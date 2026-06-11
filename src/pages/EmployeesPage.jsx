@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react';
-import { UserPlus, Edit2, Trash2, Eye } from 'lucide-react';
+import { UserPlus, Pencil, Trash2, Eye, ToggleLeft, ToggleRight, RefreshCw, Wand2, PenLine } from 'lucide-react';
 import { useSubscription } from '../context/SubscriptionContext';
 import { fmt } from '../utils/dateTime';
 import { Avatar, StatusBadge, SearchInput, SelectField, SectionHeader, EmptyState, Modal, InputField } from '../components/ui';
@@ -22,6 +22,7 @@ export default function EmployeesPage() {
   const [addModal, setAddModal] = useState(false);
   const [selected, setSelected] = useState(null);
   const [editTarget, setEditTarget] = useState(null);
+  const [editModal, setEditModal] = useState(false);
 
   const employees = useMemo(() => {
     let list = EMPLOYEES.map(e => ({
@@ -52,6 +53,13 @@ export default function EmployeesPage() {
     removeEmployee(emp.id);
     toast(`${emp.firstName} ${emp.lastName} removed`, 'warning');
     setSelected(null);
+  }
+
+  function handleEdit(form) {
+    updateEmployee(editTarget.id, form);
+    toast('Employee updated', 'success');
+    setEditModal(false);
+    setEditTarget(null);
   }
 
   function handleToggleStatus(emp) {
@@ -144,7 +152,18 @@ export default function EmployeesPage() {
                         <td>
                           <div className="flex items-center gap-1">
                             <button onClick={() => setSelected(emp)} className="btn-ghost btn-sm p-1.5 rounded-md" title="View"><Eye size={13} /></button>
-                            <button onClick={() => handleToggleStatus(emp)} className="btn-ghost btn-sm p-1.5 rounded-md" title="Toggle status"><Edit2 size={13} /></button>
+                            <button
+                              onClick={() => { setEditTarget(emp); setEditModal(true); }}
+                              className="btn-ghost btn-sm p-1.5 rounded-md"
+                              title="Edit employee"
+                            ><Pencil size={13} /></button>
+                            <button
+                              onClick={() => handleToggleStatus(emp)}
+                              className={`btn-ghost btn-sm p-1.5 rounded-md ${emp.status === 'active' ? 'text-success-600 hover:bg-success-50' : 'text-ink-400 hover:bg-surface-100'}`}
+                              title={emp.status === 'active' ? 'Mark as inactive' : 'Mark as active'}
+                            >
+                              {emp.status === 'active' ? <ToggleRight size={15} /> : <ToggleLeft size={15} />}
+                            </button>
                             <button onClick={() => handleRemove(emp)} className="btn-ghost btn-sm p-1.5 rounded-md text-danger-500 hover:bg-danger-50" title="Remove"><Trash2 size={13} /></button>
                           </div>
                         </td>
@@ -202,6 +221,11 @@ export default function EmployeesPage() {
                 { l: 'Phone',         v: selected.phone || '—' },
                 { l: 'Department',    v: selected.department },
                 { l: 'Date Joined',   v: fmt.date(selected.joinDate) },
+                { l: 'Assigned Shift', v: (() => {
+                    const s = SHIFTS.find(sh => String(sh.id) === String(selected.shiftId));
+                    return s ? `${s.name} (${s.start} – ${s.end})` : '—';
+                  })()
+                },
               ].map(({ l, v }) => (
                 <div key={l} className="p-3 rounded-lg bg-surface-50">
                   <p className="label mb-0">{l}</p>
@@ -213,12 +237,25 @@ export default function EmployeesPage() {
         )}
       </Modal>
 
+      {/* Edit Employee Modal */}
+      {editTarget && (
+        <EditEmployeeModal
+          open={editModal}
+          onClose={() => { setEditModal(false); setEditTarget(null); }}
+          onSave={handleEdit}
+          departments={DEPARTMENTS}
+          shifts={SHIFTS}
+          employee={editTarget}
+        />
+      )}
+
       {/* Add Employee Modal */}
       <AddEmployeeModal
         open={addModal}
         onClose={() => setAddModal(false)}
         onSave={handleAdd}
         departments={DEPARTMENTS}
+        shifts={SHIFTS}
         seatsAvailable={seatsAvailable}
         currentPlan={currentPlan}
       />
@@ -226,14 +263,35 @@ export default function EmployeesPage() {
   );
 }
 
-function AddEmployeeModal({ open, onClose, onSave, departments, seatsAvailable, currentPlan }) {
+const ROLES_SUGGESTIONS = ['Manager','Team Lead','Senior Engineer','Engineer','Analyst','Specialist','Associate','Coordinator'];
+
+function generateEmployeeCode() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const rand = Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+  const tail = String(Date.now()).slice(-3);
+  return `ERJ-${rand}${tail}`;
+}
+
+function AddEmployeeModal({ open, onClose, onSave, departments, shifts, seatsAvailable, currentPlan }) {
+  const uid = 'add';
   const [form, setForm] = useState({
     firstName: '', lastName: '', email: '', phone: '',
-    role: '', department: departments[0] || 'Engineering',
+    role: '', department: departments[0] || '',
     joinDate: new Date().toISOString().split('T')[0],
+    employeeCode: generateEmployeeCode(),
+    shiftId: '',
   });
+  const [idMode, setIdMode] = useState('auto');
   const [errors, setErrors] = useState({});
   const f = (k) => (v) => setForm(prev => ({ ...prev, [k]: v }));
+
+  function regenerate() { setForm(p => ({ ...p, employeeCode: generateEmployeeCode() })); }
+
+  function handleModeSwitch(mode) {
+    setIdMode(mode);
+    setForm(p => ({ ...p, employeeCode: mode === 'auto' ? generateEmployeeCode() : '' }));
+    setErrors(e => ({ ...e, employeeCode: undefined }));
+  }
 
   function validate() {
     const e = {};
@@ -241,14 +299,17 @@ function AddEmployeeModal({ open, onClose, onSave, departments, seatsAvailable, 
     if (!form.lastName.trim()) e.lastName = 'Required';
     if (!form.email.includes('@')) e.email = 'Valid email required';
     if (!form.role.trim()) e.role = 'Required';
+    const code = form.employeeCode.trim().toUpperCase();
+    if (!code) e.employeeCode = 'Employee ID is required';
     setErrors(e);
     return Object.keys(e).length === 0;
   }
 
   function handleSave() {
     if (!validate()) return;
-    onSave(form);
-    setForm({ firstName: '', lastName: '', email: '', phone: '', role: '', department: departments[0] || 'Engineering', joinDate: new Date().toISOString().split('T')[0] });
+    onSave({ ...form, employeeCode: form.employeeCode.trim().toUpperCase() });
+    setForm({ firstName: '', lastName: '', email: '', phone: '', role: '', department: departments[0] || '', joinDate: new Date().toISOString().split('T')[0], employeeCode: generateEmployeeCode(), shiftId: '' });
+    setIdMode('auto');
     setErrors({});
   }
 
@@ -257,9 +318,7 @@ function AddEmployeeModal({ open, onClose, onSave, departments, seatsAvailable, 
       footer={
         <>
           <button className="btn-secondary" onClick={onClose}>Cancel</button>
-          <button className="btn-primary" onClick={handleSave} disabled={seatsAvailable === 0}>
-            Add Employee
-          </button>
+          <button className="btn-primary" onClick={handleSave} disabled={seatsAvailable === 0}>Add Employee</button>
         </>
       }
     >
@@ -279,11 +338,166 @@ function AddEmployeeModal({ open, onClose, onSave, departments, seatsAvailable, 
           <InputField label="Start Date" type="date" value={form.joinDate} onChange={f('joinDate')} />
         </div>
         <div className="grid grid-cols-2 gap-3">
-          <SelectField label="Department" value={form.department} onChange={f('department')}
-            options={departments.map(d => ({ value: d, label: d }))} />
-          <InputField label="Job Title / Role" value={form.role} onChange={f('role')} placeholder="e.g. Frontend Engineer" error={errors.role} />
+          <div>
+            <label className="label">Department</label>
+            <input type="text" value={form.department} onChange={e => f('department')(e.target.value)}
+              list={`${uid}-dept-list`} placeholder="Select or type…" className="input w-full" />
+            <datalist id={`${uid}-dept-list`}>
+              {departments.map(d => <option key={d} value={d} />)}
+            </datalist>
+          </div>
+          <div>
+            <label className="label">Job Title / Role</label>
+            <input type="text" value={form.role} onChange={e => f('role')(e.target.value)}
+              list={`${uid}-role-list`} placeholder="e.g. Frontend Engineer"
+              className={`input w-full ${errors.role ? 'border-danger-500' : ''}`} />
+            <datalist id={`${uid}-role-list`}>
+              {ROLES_SUGGESTIONS.map(r => <option key={r} value={r} />)}
+            </datalist>
+            {errors.role && <p className="text-xs text-danger-600 mt-1">{errors.role}</p>}
+          </div>
+        </div>
+
+        {/* Assigned Shift */}
+        <div>
+          <label className="label">Assigned Shift</label>
+          <select value={form.shiftId} onChange={e => f('shiftId')(e.target.value)} className="input w-full">
+            <option value="">No shift assigned</option>
+            {shifts.map(s => (
+              <option key={s.id} value={s.id}>{s.name} ({s.start} – {s.end})</option>
+            ))}
+          </select>
+        </div>
+
+        {/* Employee ID */}
+        <div>
+          <div className="flex items-center justify-between mb-1.5">
+            <label className="label mb-0">Employee ID</label>
+            <div className="flex items-center gap-1 p-0.5 rounded-lg bg-surface-100">
+              {[['auto', <Wand2 size={10} />, 'Auto-generate'], ['manual', <PenLine size={10} />, 'Enter manually']].map(([mode, icon, label]) => (
+                <button key={mode} type="button" onClick={() => handleModeSwitch(mode)}
+                  className="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-semibold transition-all"
+                  style={{
+                    background: idMode === mode ? '#ffffff' : 'transparent',
+                    color: idMode === mode ? '#6366f1' : '#94a3b8',
+                    boxShadow: idMode === mode ? '0 1px 3px rgba(0,0,0,0.08)' : 'none',
+                  }}
+                >{icon} {label}</button>
+              ))}
+            </div>
+          </div>
+          {idMode === 'auto' ? (
+            <div className="flex items-center gap-2">
+              <div className="flex-1 flex items-center px-3.5 py-2.5 rounded-xl border font-mono text-sm"
+                style={{ background: '#f8fafc', border: `1px solid ${errors.employeeCode ? '#f87171' : '#e2e8f0'}`, color: '#6366f1', letterSpacing: '0.05em' }}>
+                <span className="flex-1">{form.employeeCode}</span>
+                <span className="text-[10px] font-sans font-semibold px-1.5 py-0.5 rounded-md ml-2"
+                  style={{ background: 'rgba(99,102,241,0.08)', color: '#818cf8' }}>AUTO</span>
+              </div>
+              <button type="button" onClick={regenerate} title="Generate new ID"
+                className="w-10 h-10 rounded-xl flex items-center justify-center transition-all hover:bg-brand-50 shrink-0"
+                style={{ border: '1px solid #e2e8f0', color: '#6366f1' }}>
+                <RefreshCw size={14} />
+              </button>
+            </div>
+          ) : (
+            <div>
+              <input type="text" value={form.employeeCode}
+                onChange={e => f('employeeCode')(e.target.value.toUpperCase())}
+                placeholder="e.g. HR-001, TECH-SANTOS" autoFocus maxLength={20}
+                className={`input font-mono uppercase w-full ${errors.employeeCode ? 'border-danger-500' : ''}`} />
+              <p className="text-xs text-ink-400 mt-1">Letters & numbers only · max 20 chars · stored in uppercase</p>
+            </div>
+          )}
+          {errors.employeeCode && <p className="text-xs text-danger-600 mt-1">{errors.employeeCode}</p>}
         </div>
       </div>
     </Modal>
   );
 }
+
+function EditEmployeeModal({ open, onClose, onSave, departments, shifts, employee }) {
+  const uid = `edit-${employee.id}`;
+  const [form, setForm] = useState({
+    firstName: employee.firstName,
+    lastName: employee.lastName,
+    email: employee.email,
+    phone: employee.phone || '',
+    role: employee.role,
+    department: employee.department,
+    joinDate: employee.joinDate,
+    shiftId: employee.shiftId || '',
+  });
+  const [errors, setErrors] = useState({});
+  const f = (k) => (v) => setForm(prev => ({ ...prev, [k]: v }));
+
+  function validate() {
+    const e = {};
+    if (!form.firstName.trim()) e.firstName = 'Required';
+    if (!form.lastName.trim()) e.lastName = 'Required';
+    if (!form.email.includes('@')) e.email = 'Valid email required';
+    if (!form.role.trim()) e.role = 'Required';
+    setErrors(e);
+    return Object.keys(e).length === 0;
+  }
+
+  function handleSave() {
+    if (!validate()) return;
+    onSave(form);
+  }
+
+  return (
+    <Modal open={open} onClose={onClose} title="Edit Employee" width="max-w-xl"
+      footer={
+        <>
+          <button className="btn-secondary" onClick={onClose}>Cancel</button>
+          <button className="btn-primary" onClick={handleSave}>Save Changes</button>
+        </>
+      }
+    >
+      <div className="space-y-3">
+        <div className="grid grid-cols-2 gap-3">
+          <InputField label="First Name" value={form.firstName} onChange={f('firstName')} placeholder="Maria" error={errors.firstName} />
+          <InputField label="Last Name" value={form.lastName} onChange={f('lastName')} placeholder="Santos" error={errors.lastName} />
+        </div>
+        <InputField label="Work Email" type="email" value={form.email} onChange={f('email')} placeholder="m.santos@company.com" error={errors.email} />
+        <div className="grid grid-cols-2 gap-3">
+          <InputField label="Phone" value={form.phone} onChange={f('phone')} placeholder="+63 9xx xxx xxxx" />
+          <InputField label="Start Date" type="date" value={form.joinDate} onChange={f('joinDate')} />
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="label">Department</label>
+            <input type="text" value={form.department} onChange={e => f('department')(e.target.value)}
+              list={`${uid}-dept-list`} placeholder="Select or type…" className="input w-full" />
+            <datalist id={`${uid}-dept-list`}>
+              {departments.map(d => <option key={d} value={d} />)}
+            </datalist>
+          </div>
+          <div>
+            <label className="label">Job Title / Role</label>
+            <input type="text" value={form.role} onChange={e => f('role')(e.target.value)}
+              list={`${uid}-role-list`} placeholder="e.g. Frontend Engineer"
+              className={`input w-full ${errors.role ? 'border-danger-500' : ''}`} />
+            <datalist id={`${uid}-role-list`}>
+              {ROLES_SUGGESTIONS.map(r => <option key={r} value={r} />)}
+            </datalist>
+            {errors.role && <p className="text-xs text-danger-600 mt-1">{errors.role}</p>}
+          </div>
+        </div>
+
+        {/* Assigned Shift */}
+        <div>
+          <label className="label">Assigned Shift</label>
+          <select value={form.shiftId} onChange={e => f('shiftId')(e.target.value)} className="input w-full">
+            <option value="">No shift assigned</option>
+            {shifts.map(s => (
+              <option key={s.id} value={s.id}>{s.name} ({s.start} – {s.end})</option>
+            ))}
+          </select>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+

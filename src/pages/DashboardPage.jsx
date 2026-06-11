@@ -23,7 +23,7 @@ export default function DashboardPage() {
   const todayRecs = attendanceRecords.filter(r => r.date === today);
   const presentToday = todayRecs.filter(r => r.status === 'present' || r.status === 'late').length;
   const lateToday = todayRecs.filter(r => r.status === 'late').length;
-  const absentToday = employees.filter(e => e.status === 'active' && !todayRecs.find(r => r.employeeId === e.id)).length;
+  const absentToday = employees.filter(e => e.status === 'active' && !todayRecs.find(r => String(r.employeeId) === String(e.id))).length;
   const pendingLeave = leaveRequests.filter(r => r.status === 'pending').length;
 
   const weekTrend = useMemo(() => {

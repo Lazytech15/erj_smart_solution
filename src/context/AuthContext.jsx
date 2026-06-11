@@ -1,43 +1,39 @@
 import { createContext, useContext, useState, useCallback } from 'react';
+import { getAccount, putAccount, getAllAccounts } from '../utils/db';
 
 const AuthContext = createContext(null);
 
+// attms_user in localStorage holds only the lightweight session
+// (no password, just id/email/role/name/subscriptionId).
+// All real account data lives in IndexedDB  accounts  store.
 const USER_KEY = 'attms_user';
-const SUB_USERS_KEY = 'attms_sub_users';
 
-function loadUser() {
+function loadSession() {
   try { return JSON.parse(localStorage.getItem(USER_KEY)); } catch { return null; }
-}
-function loadSubUsers() {
-  try { return JSON.parse(localStorage.getItem(SUB_USERS_KEY)) || []; } catch { return []; }
 }
 
 export function AuthProvider({ children }) {
-  const [user, setUser] = useState(() => loadUser());
+  const [user, setUser] = useState(() => loadSession());
 
-  // Register the admin account for a new subscription (called from SignupPage)
-  const registerCompanyAdmin = useCallback(({ adminName, adminEmail, password }) => {
-    const subUsers = loadSubUsers();
-    // Remove any existing admin for this email
-    const filtered = subUsers.filter(u => u.email !== adminEmail);
+  // Called from SignupPage after subscribe() creates the subscription.
+  // Stores the admin account in IndexedDB keyed by email.
+  const registerCompanyAdmin = useCallback(async ({ adminName, adminEmail, password, subscriptionId }) => {
     const admin = {
-      id: `admin_${Date.now()}`,
       email: adminEmail,
       password,
       role: 'admin',
       name: adminName,
+      id: `admin_${Date.now()}`,
       employeeId: null,
+      subscriptionId,
     };
-    filtered.push(admin);
-    localStorage.setItem(SUB_USERS_KEY, JSON.stringify(filtered));
+    await putAccount(admin);
     return admin;
   }, []);
 
   const login = useCallback(async (email, password) => {
-    // Check subscription-registered accounts first
-    const subUsers = loadSubUsers();
-    const found = subUsers.find(u => u.email === email && u.password === password);
-    if (!found) throw new Error('Invalid email or password');
+    const found = await getAccount(email);
+    if (!found || found.password !== password) throw new Error('Invalid email or password');
     const { password: _, ...safe } = found;
     setUser(safe);
     localStorage.setItem(USER_KEY, JSON.stringify(safe));

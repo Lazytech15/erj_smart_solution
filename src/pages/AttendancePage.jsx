@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react';
 import { format, subDays, parseISO } from 'date-fns';
-import { Clock, Download, ChevronLeft, ChevronRight, Plus } from 'lucide-react';
+import { Clock, ChevronLeft, ChevronRight, Plus } from 'lucide-react';
 import { useSubscription } from '../context/SubscriptionContext';
 import { fmt } from '../utils/dateTime';
 import { StatusBadge, Avatar, SearchInput, SelectField, SectionHeader, EmptyState, Modal, InputField } from '../components/ui';
@@ -9,26 +9,44 @@ import { useAuth } from '../context/AuthContext';
 
 const STATUSES = ['present', 'late', 'absent', 'half-day'];
 
+/** Return 'present' | 'late' | 'absent' based on clock-in vs shift start.
+ *  lateThresholdMin: minutes after shift start before considered "late" (default 15). */
+function calcStatus(clockInTime, shiftStart, lateThresholdMin = 15) {
+  if (!clockInTime || !shiftStart) return '';
+  const [ch, cm] = clockInTime.split(':').map(Number);
+  const [sh, sm] = shiftStart.split(':').map(Number);
+  const clockMins = ch * 60 + cm;
+  const shiftMins = sh * 60 + sm;
+  if (clockMins <= shiftMins + lateThresholdMin) return 'present';
+  return 'late';
+}
+
 export default function AttendancePage() {
   const toast = useToast();
   const { can } = useAuth();
   const { subscription, addAttendanceRecord, updateAttendanceRecord } = useSubscription();
 
-  const employees = subscription?.enrolledEmployees || [];
+  const employees        = subscription?.enrolledEmployees  || [];
   const attendanceRecords = subscription?.attendanceRecords || [];
-  const departments = subscription?.departments || [];
+  const departments      = subscription?.departments        || [];
+  const shifts           = subscription?.shifts             || [];
+  const lateThreshold    = Number(subscription?.settings?.lateThreshold ?? 15);
 
-  const [search, setSearch] = useState('');
-  const [dept, setDept] = useState('all');
+  const [search,       setSearch]       = useState('');
+  const [dept,         setDept]         = useState('all');
   const [statusFilter, setStatusFilter] = useState('all');
-  const [date, setDate] = useState(format(new Date(), 'yyyy-MM-dd'));
-  const [addModal, setAddModal] = useState(false);
-  const [editRecord, setEditRecord] = useState(null);
+  const [date,         setDate]         = useState(format(new Date(), 'yyyy-MM-dd'));
+  const [addModal,     setAddModal]     = useState(false);
+  const [editRecord,   setEditRecord]   = useState(null);
 
   const records = useMemo(() => {
     let recs = attendanceRecords
       .filter(r => r.date === date)
-      .map(r => ({ ...r, employee: employees.find(e => e.id === r.employeeId) }))
+      .map(r => {
+        const employee = employees.find(e => String(e.id) === String(r.employeeId));
+        const shift    = employee?.shiftId ? shifts.find(s => String(s.id) === String(employee.shiftId)) : null;
+        return { ...r, employee, shift };
+      })
       .filter(r => r.employee);
 
     if (search) recs = recs.filter(r =>
@@ -37,8 +55,10 @@ export default function AttendancePage() {
     );
     if (dept !== 'all') recs = recs.filter(r => r.employee.department === dept);
     if (statusFilter !== 'all') recs = recs.filter(r => r.status === statusFilter);
-    return recs.sort((a, b) => `${a.employee.firstName} ${a.employee.lastName}`.localeCompare(`${b.employee.firstName} ${b.employee.lastName}`));
-  }, [attendanceRecords, employees, date, search, dept, statusFilter]);
+    return recs.sort((a, b) =>
+      `${a.employee.firstName} ${a.employee.lastName}`.localeCompare(`${b.employee.firstName} ${b.employee.lastName}`)
+    );
+  }, [attendanceRecords, employees, shifts, date, search, dept, statusFilter]);
 
   function prevDay() { setDate(d => format(subDays(parseISO(d), 1), 'yyyy-MM-dd')); }
   function nextDay() {
@@ -106,6 +126,7 @@ export default function AttendancePage() {
               <tr>
                 <th>Employee</th>
                 <th>Department</th>
+                <th>Shift</th>
                 <th>Clock In</th>
                 <th>Clock Out</th>
                 <th>Status</th>
@@ -125,6 +146,19 @@ export default function AttendancePage() {
                     </div>
                   </td>
                   <td><span className="text-xs text-ink-600">{rec.employee.department}</span></td>
+                  <td>
+                    {rec.shift ? (
+                      <div className="flex items-center gap-1.5">
+                        <span className="w-2 h-2 rounded-full shrink-0" style={{ background: rec.shift.color }} />
+                        <div>
+                          <p className="text-xs text-ink-700 font-medium leading-none">{rec.shift.name}</p>
+                          <p className="text-[10px] text-ink-400 mt-0.5">{rec.shift.start} – {rec.shift.end}</p>
+                        </div>
+                      </div>
+                    ) : (
+                      <span className="text-xs text-ink-300">—</span>
+                    )}
+                  </td>
                   <td><span className="text-xs text-ink-600">{rec.clockIn || '—'}</span></td>
                   <td><span className="text-xs text-ink-600">{rec.clockOut || '—'}</span></td>
                   <td><StatusBadge status={rec.status} /></td>
@@ -146,6 +180,8 @@ export default function AttendancePage() {
         onClose={() => setAddModal(false)}
         onSave={handleAddRecord}
         employees={employees}
+        shifts={shifts}
+        lateThreshold={lateThreshold}
         title="Add Attendance Record"
         initial={{ employeeId: '', clockIn: '', clockOut: '', status: 'present', notes: '' }}
       />
@@ -157,18 +193,49 @@ export default function AttendancePage() {
           onClose={() => setEditRecord(null)}
           onSave={handleEditRecord}
           employees={employees}
+          shifts={shifts}
+          lateThreshold={lateThreshold}
           title="Edit Attendance Record"
-          initial={{ employeeId: editRecord.employeeId, clockIn: editRecord.clockIn || '', clockOut: editRecord.clockOut || '', status: editRecord.status, notes: editRecord.notes || '' }}
+          initial={{
+            employeeId: editRecord.employeeId,
+            clockIn:    editRecord.clockIn  || '',
+            clockOut:   editRecord.clockOut || '',
+            status:     editRecord.status,
+            notes:      editRecord.notes   || '',
+          }}
         />
       )}
     </div>
   );
 }
 
-function AttendanceModal({ open, onClose, onSave, employees, title, initial }) {
+function AttendanceModal({ open, onClose, onSave, employees, shifts, lateThreshold, title, initial }) {
   const [form, setForm] = useState(initial);
   const f = k => v => setForm(p => ({ ...p, [k]: v }));
-  const empOptions = [{ value: '', label: 'Select employee…' }, ...employees.map(e => ({ value: e.id, label: `${e.firstName} ${e.lastName}` }))];
+
+  const empOptions = [
+    { value: '', label: 'Select employee…' },
+    ...employees.map(e => ({ value: e.id, label: `${e.firstName} ${e.lastName}` })),
+  ];
+
+  // Derive the selected employee's assigned shift
+  const selectedEmp   = employees.find(e => String(e.id) === String(form.employeeId));
+  const assignedShift = selectedEmp?.shiftId
+    ? shifts.find(s => String(s.id) === String(selectedEmp.shiftId))
+    : null;
+
+  // Auto-fill status when employee or clock-in changes
+  function handleEmployeeChange(empId) {
+    const emp   = employees.find(e => String(e.id) === String(empId));
+    const shift = emp?.shiftId ? shifts.find(s => String(s.id) === String(emp.shiftId)) : null;
+    const auto  = form.clockIn && shift ? calcStatus(form.clockIn, shift.start, lateThreshold) : form.status;
+    setForm(p => ({ ...p, employeeId: empId, status: auto || p.status }));
+  }
+
+  function handleClockInChange(time) {
+    const auto = time && assignedShift ? calcStatus(time, assignedShift.start, lateThreshold) : '';
+    setForm(p => ({ ...p, clockIn: time, ...(auto ? { status: auto } : {}) }));
+  }
 
   return (
     <Modal open={open} onClose={onClose} title={title} width="max-w-md"
@@ -180,14 +247,36 @@ function AttendanceModal({ open, onClose, onSave, employees, title, initial }) {
       }
     >
       <div className="space-y-3">
-        <SelectField label="Employee" value={form.employeeId} onChange={f('employeeId')} options={empOptions} />
+        <SelectField label="Employee" value={form.employeeId} onChange={handleEmployeeChange} options={empOptions} />
+
+        {/* Show assigned shift as info */}
+        {assignedShift && (
+          <div className="flex items-center gap-2 px-3 py-2 rounded-lg" style={{ background: assignedShift.color + '15', border: `1px solid ${assignedShift.color}33` }}>
+            <span className="w-2 h-2 rounded-full shrink-0" style={{ background: assignedShift.color }} />
+            <span className="text-xs font-medium" style={{ color: assignedShift.color }}>
+              {assignedShift.name} · {assignedShift.start} – {assignedShift.end}
+            </span>
+          </div>
+        )}
+
         <div className="grid grid-cols-2 gap-3">
-          <InputField label="Clock In" type="time" value={form.clockIn} onChange={f('clockIn')} />
+          <InputField label="Clock In"  type="time" value={form.clockIn}  onChange={handleClockInChange} />
           <InputField label="Clock Out" type="time" value={form.clockOut} onChange={f('clockOut')} />
         </div>
+
         <SelectField label="Status" value={form.status} onChange={f('status')}
-          options={[{ value: 'present', label: 'Present' }, { value: 'late', label: 'Late' }, { value: 'absent', label: 'Absent' }, { value: 'half-day', label: 'Half Day' }]}
+          options={[
+            { value: 'present',  label: 'Present'  },
+            { value: 'late',     label: 'Late'      },
+            { value: 'absent',   label: 'Absent'    },
+            { value: 'half-day', label: 'Half Day'  },
+          ]}
         />
+        {assignedShift && form.clockIn && (
+          <p className="text-[11px] text-ink-400">
+            Status auto-calculated from shift start ({assignedShift.start}) ± {lateThreshold} min grace period.
+          </p>
+        )}
         <InputField label="Notes" value={form.notes} onChange={f('notes')} placeholder="Optional notes…" />
       </div>
     </Modal>
