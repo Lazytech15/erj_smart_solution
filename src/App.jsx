@@ -1,8 +1,10 @@
+import { useEffect, useState } from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { SubscriptionProvider, useSubscription } from './context/SubscriptionContext';
 import { ToastProvider } from './context/ToastContext';
 import AppLayout from './components/layout/AppLayout';
+import LoadingScreen from './components/LoadingScreen';
 
 import LandingPage from './pages/public/LandingPage';
 import PricingPage from './pages/public/PricingPage';
@@ -29,7 +31,7 @@ function PrivateRoute({ children, roles }) {
   const { subscription, loading } = useSubscription();
 
   if (!user) return <Navigate to="/login" replace />;
-  if (loading) return null;                                          // wait for DB load
+  if (loading) return <LoadingScreen />;                              // wait for DB load
   if (!subscription) return <Navigate to="/pricing" replace />;
   if (subscription.status === 'cancelled') return <Navigate to="/pricing" replace />;
   if (roles && !roles.includes(user.role)) return <Navigate to="/app/dashboard" replace />;
@@ -43,11 +45,57 @@ function PrivateRoute({ children, roles }) {
 function PublicRoute({ children }) {
   const { user } = useAuth();
   const { subscription, loading } = useSubscription();
-  if (loading) return null;
-  if (user && subscription && subscription.status !== 'cancelled') {
-    return <Navigate to="/app/dashboard" replace />;
-  }
+
+  if (loading) return <LoadingScreen />;
+  if (user) return <Navigate to="/app/dashboard" replace />;
   return children;
+}
+
+/**
+ * Shows the loading splash on the very first page load (e.g. hard refresh),
+ * then fades it out once the app shell has mounted. Keeps a minimum
+ * display time so it doesn't just flash for a frame on fast connections.
+ */
+function FirstLoadGate({ children }) {
+  const [visible, setVisible] = useState(true);
+  const [fading, setFading] = useState(false);
+  // Initialize synchronously — if the page is already loaded (common in SPAs
+  // after a hot-reload or navigation), readyState is already 'complete' before
+  // this component even mounts, so the useEffect listener would never fire.
+  const [appReady, setAppReady] = useState(() => document.readyState === 'complete');
+
+  // Only attach the listener when the page hasn't finished loading yet
+  useEffect(() => {
+    if (document.readyState === 'complete') {
+      // Already ready (handles the race where readyState changed between the
+      // useState initializer and the effect running)
+      setAppReady(true);
+      return;
+    }
+    const onLoad = () => setAppReady(true);
+    window.addEventListener('load', onLoad);
+    return () => window.removeEventListener('load', onLoad);
+  }, []);
+
+  // Called by LoadingScreen once its progress bar finishes at 100%
+  const handleLoadComplete = () => {
+    setFading(true);
+    setTimeout(() => setVisible(false), 320); // matches fade-out transition
+  };
+
+  return (
+    <>
+      {children}
+      {visible && (
+        <div className={`erj-first-load${fading ? ' erj-first-load--out' : ''}`}>
+          <LoadingScreen
+            label="Loading…"
+            onComplete={appReady ? handleLoadComplete : undefined}
+          />
+        </div>
+      )}
+    </>
+  );
 }
 
 function AppRoutes() {
@@ -93,7 +141,9 @@ export default function App() {
       <AuthProvider>
         <SubscriptionProvider>
           <ToastProvider>
-            <AppRoutes />
+            <FirstLoadGate>
+              <AppRoutes />
+            </FirstLoadGate>
           </ToastProvider>
         </SubscriptionProvider>
       </AuthProvider>

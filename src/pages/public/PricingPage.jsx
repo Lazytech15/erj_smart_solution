@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Check, X, ArrowRight, Zap } from 'lucide-react';
+import { Check, X, ArrowRight, ArrowLeft, Zap } from 'lucide-react';
 import { PLANS } from '../../context/SubscriptionContext';
 
 const ALL_FEATURES = [
@@ -124,6 +124,12 @@ export default function PricingPage() {
         className="flex items-center justify-between px-8 py-4 bg-white"
         style={{ boxShadow: '0 1px 4px rgba(0,0,0,0.06)' }}
       >
+        <button
+          onClick={() => navigate('/')}
+          className="text-xs font-semibold text-slate-500 hover:text-slate-900 transition-colors flex items-center gap-1.5"
+        >
+          <ArrowLeft size={12} /> Back to homepage
+        </button>
         <div className="flex items-center gap-3">
           <img src="/logo.svg" alt="ERJ Smart Solutions" className="h-8 w-auto" />
           <span className="font-bold text-slate-900 text-sm">ERJ Smart Solutions</span>
@@ -311,6 +317,13 @@ export default function PricingPage() {
             ))}
           </div>
         </div>
+
+        <button
+          onClick={() => navigate('/')}
+          className="mt-10 text-xs font-semibold text-slate-400 hover:text-slate-700 transition-colors flex items-center gap-1.5"
+        >
+          <ArrowLeft size={12} /> Back to homepage
+        </button>
       </main>
     </div>
   );

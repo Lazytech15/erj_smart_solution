@@ -179,3 +179,67 @@
     animation: slide-in 0.2s ease-out;
   }
 }
+
+/* ─── ERJ Loading Screen ─────────────────────────────────────────────────── */
+@layer components {
+  .erj-loading-screen {
+    @apply fixed inset-0 z-[200] flex flex-col items-center justify-center gap-6;
+    background: #F3F4F4;
+  }
+
+  .erj-loading-logo {
+    width: 96px;
+    height: 96px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    animation: erj-logo-pulse 3s ease-in-out infinite;
+  }
+  .erj-loading-logo img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+  }
+
+  .erj-loading-squares {
+    display: flex;
+    gap: 10px;
+  }
+  .erj-loading-square {
+    width: 14px;
+    height: 14px;
+    border-radius: 4px;
+    background: linear-gradient(135deg, #1e1b4b 0%, #6366f1 50%, #22d3ee 100%);
+    animation: erj-square-pulse 1.333s ease-in-out infinite;
+  }
+
+  .erj-loading-label {
+    @apply text-ink-400 font-medium;
+    font-size: 0.8125rem;
+    letter-spacing: 0.02em;
+  }
+}
+
+@keyframes erj-logo-pulse {
+  0%   { opacity: 0.8; transform: scale(0.95); }
+  50%  { opacity: 1;   transform: scale(1); }
+  100% { opacity: 0.8; transform: scale(0.95); }
+}
+
+@keyframes erj-square-pulse {
+  0%   { opacity: 0.2; transform: scale(0.85); }
+  50%  { opacity: 1;   transform: scale(1); }
+  100% { opacity: 0.2; transform: scale(0.85); }
+}
+
+.erj-first-load {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  opacity: 1;
+  transition: opacity 300ms ease;
+}
+.erj-first-load--out {
+  opacity: 0;
+  pointer-events: none;
+}

@@ -5,8 +5,11 @@ import {
   Trash2, ChevronDown, ChevronUp, AlertCircle, RefreshCw, PenLine, Wand2, Download
 } from 'lucide-react';
 import { useSubscription } from '../../context/SubscriptionContext';
+import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { InputField, Avatar, Spinner } from '../../components/ui';
+import LoadingScreen from '../../components/LoadingScreen';
+import TransitionLoadingScreen from '../../components/TransitionLoadingScreen';
 
 const DEPARTMENTS_SUGGESTIONS = [
   'Engineering', 'Human Resources', 'Finance', 'Operations',
@@ -242,11 +245,13 @@ function EmployeeForm({ onAdd, seatsAvailable, currentPlan, existingCodes, depar
 export default function OnboardingPage() {
   const navigate = useNavigate();
   const toast = useToast();
+  const { commitLogin } = useAuth();
   const {
     subscription, loading, currentPlan, seatsUsed, seatsAvailable,
     enrollEmployee, removeEmployee,
   } = useSubscription();
   const [saving, setSaving] = useState(false);
+  const [transitioning, setTransitioning] = useState(false);
   const [expanded, setExpanded] = useState(null);
   const [csvErrors, setCsvErrors] = useState([]);
   const [csvImporting, setCsvImporting] = useState(false);
@@ -255,7 +260,8 @@ export default function OnboardingPage() {
     if (!loading && !subscription) navigate('/pricing');
   }, [subscription, loading, navigate]);
 
-  if (loading || !subscription) return null;
+  if (loading) return <LoadingScreen label="Setting up your workspace…" />;
+  if (!subscription) return null;
 
   const enrolled = subscription.enrolledEmployees || [];
   const departments = subscription.departments || [];
@@ -309,10 +315,19 @@ export default function OnboardingPage() {
 
   async function handleFinish() {
     setSaving(true);
-    await new Promise(r => setTimeout(r, 800));
+    await new Promise(r => setTimeout(r, 600));
     setSaving(false);
     toast(`Workspace ready! ${enrolled.length > 0 ? enrolled.length + ' employees enrolled. ' : ''}Taking you to your dashboard.`, 'success');
-    navigate('/app/dashboard');
+    setTransitioning(true);
+  }
+
+  if (transitioning) {
+    return (
+      <TransitionLoadingScreen
+        label="Setting up your dashboard…"
+        onComplete={() => { commitLogin(); navigate('/app/dashboard'); }}
+      />
+    );
   }
 
   const maxSeats = currentPlan?.maxSeats === Infinity ? '∞' : currentPlan?.maxSeats;

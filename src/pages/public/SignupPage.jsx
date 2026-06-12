@@ -394,6 +394,14 @@ export default function SignupPage() {
               </div>
             </div>
 
+            {/* Back to pricing */}
+            <button
+              onClick={() => navigate('/pricing')}
+              className="flex items-center gap-1.5 text-sm text-slate-400 hover:text-slate-600 transition-colors mb-6"
+            >
+              <ArrowLeft size={14} /> Back to pricing
+            </button>
+
             {/* White card */}
             <div
               className="bg-white rounded-2xl p-8"

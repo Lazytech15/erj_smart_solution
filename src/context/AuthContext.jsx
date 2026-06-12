@@ -1,11 +1,8 @@
-import { createContext, useContext, useState, useCallback } from 'react';
-import { getAccount, putAccount, getAllAccounts } from '../utils/db';
+import { createContext, useContext, useState, useCallback, useRef } from 'react';
+import { getAccount, putAccount } from '../utils/db';
 
 const AuthContext = createContext(null);
 
-// attms_user in localStorage holds only the lightweight session
-// (no password, just id/email/role/name/subscriptionId).
-// All real account data lives in IndexedDB  accounts  store.
 const USER_KEY = 'attms_user';
 
 function loadSession() {
@@ -14,9 +11,11 @@ function loadSession() {
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(() => loadSession());
+  // Holds a validated user object waiting to be committed after the
+  // transition animation finishes. PublicRoute only reads `user`, so
+  // the route stays on LoginPage while the animation plays.
+  const pendingUserRef = useRef(null);
 
-  // Called from SignupPage after subscribe() creates the subscription.
-  // Stores the admin account in IndexedDB keyed by email.
   const registerCompanyAdmin = useCallback(async ({ adminName, adminEmail, password, subscriptionId }) => {
     const admin = {
       email: adminEmail,
@@ -31,13 +30,28 @@ export function AuthProvider({ children }) {
     return admin;
   }, []);
 
+  /**
+   * Validates credentials and stores the safe user in pendingUserRef.
+   * Does NOT set user state yet — call commitLogin() to do that.
+   */
   const login = useCallback(async (email, password) => {
     const found = await getAccount(email);
     if (!found || found.password !== password) throw new Error('Invalid email or password');
     const { password: _, ...safe } = found;
+    pendingUserRef.current = safe;
+    return safe;
+  }, []);
+
+  /**
+   * Actually commits the pending login — sets user state and persists
+   * to localStorage. Call this from the transition screen's onComplete.
+   */
+  const commitLogin = useCallback(() => {
+    const safe = pendingUserRef.current;
+    if (!safe) return;
+    pendingUserRef.current = null;
     setUser(safe);
     localStorage.setItem(USER_KEY, JSON.stringify(safe));
-    return safe;
   }, []);
 
   const logout = useCallback(() => {
@@ -57,7 +71,7 @@ export function AuthProvider({ children }) {
   }, [user]);
 
   return (
-    <AuthContext.Provider value={{ user, login, logout, can, registerCompanyAdmin }}>
+    <AuthContext.Provider value={{ user, login, commitLogin, logout, can, registerCompanyAdmin }}>
       {children}
     </AuthContext.Provider>
   );

@@ -4,6 +4,7 @@ import { Eye, EyeOff, ArrowRight, Clock, FileText, Users, Shield } from 'lucide-
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { Spinner } from '../components/ui';
+import TransitionLoadingScreen from '../components/TransitionLoadingScreen';
 
 const FEATURES = [
   { icon: Clock, label: 'Real-time attendance tracking' },
@@ -13,7 +14,7 @@ const FEATURES = [
 ];
 
 export default function LoginPage() {
-  const { login } = useAuth();
+  const { login, commitLogin } = useAuth();
   const toast = useToast();
   const navigate = useNavigate();
   const [email, setEmail] = useState('');
@@ -21,6 +22,7 @@ export default function LoginPage() {
   const [showPw, setShowPw] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [transitioning, setTransitioning] = useState(false);
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -28,13 +30,27 @@ export default function LoginPage() {
     setLoading(true);
     try {
       await login(email, password);
+      // login() only validates + stores pending user, does NOT set auth state yet.
+      // Show transition first; commitLogin() fires inside onComplete.
       toast('Welcome back!', 'success');
-      navigate('/app/dashboard');
+      setTransitioning(true);
     } catch (err) {
       setError(err.message);
-    } finally {
       setLoading(false);
     }
+  }
+
+  // Shown after successful login — plays progress bar before navigating
+  if (transitioning) {
+    return (
+      <TransitionLoadingScreen
+        label="Signing you in…"
+        onComplete={() => {
+          commitLogin();           // now set user → PublicRoute will no longer block
+          navigate('/app/dashboard');
+        }}
+      />
+    );
   }
 
   return (
@@ -44,14 +60,12 @@ export default function LoginPage() {
         className="hidden lg:flex flex-col w-[420px] shrink-0 relative overflow-hidden"
         style={{ background: 'linear-gradient(145deg, #0f172a 0%, #1e1b4b 60%, #1e1b4b 100%)' }}
       >
-        {/* Decorative circles */}
         <div className="absolute -top-24 -left-24 w-96 h-96 rounded-full opacity-10"
           style={{ background: 'radial-gradient(circle, #6366f1, transparent)' }} />
         <div className="absolute -bottom-32 -right-16 w-80 h-80 rounded-full opacity-10"
           style={{ background: 'radial-gradient(circle, #8b5cf6, transparent)' }} />
 
         <div className="relative z-10 flex flex-col h-full p-12">
-          {/* Logo */}
           <div className="flex items-center gap-3 mb-16">
             <img src="/logo.svg" alt="ERJ Smart Solutions" className="h-10 w-auto" style={{ filter: 'brightness(0) invert(1)' }} />
             <span className="text-white font-bold text-sm">ERJ Smart Solutions</span>
@@ -89,7 +103,6 @@ export default function LoginPage() {
             </div>
           </div>
 
-          {/* Stats row */}
           <div
             className="grid grid-cols-3 gap-4 mt-10 pt-8 border-t"
             style={{ borderColor: 'rgba(255,255,255,0.07)' }}
@@ -111,7 +124,6 @@ export default function LoginPage() {
       {/* Right panel */}
       <div className="flex-1 flex flex-col items-center justify-center p-8" style={{ background: '#F3F4F4' }}>
         <div className="w-full max-w-[400px]">
-          {/* Mobile logo */}
           <div className="lg:hidden flex items-center gap-2.5 mb-10">
             <img src="/logo.svg" alt="ERJ Smart Solutions" className="h-8 w-auto" />
             <span className="font-bold text-slate-900 text-sm">ERJ Smart Solutions</span>
@@ -125,7 +137,6 @@ export default function LoginPage() {
             Back to home
           </button>
 
-          {/* Card */}
           <div
             className="bg-white rounded-2xl p-8"
             style={{ boxShadow: '0 8px 32px rgba(0,0,0,0.10), 0 1px 4px rgba(0,0,0,0.06)' }}
@@ -150,7 +161,6 @@ export default function LoginPage() {
                 </label>
                 <input
                   className="w-full px-3.5 py-2.5 rounded-xl text-sm text-slate-900 bg-slate-50 border border-slate-200 outline-none transition-all focus:border-indigo-400 focus:ring-2 focus:bg-white placeholder-slate-300"
-                  style={{ '--tw-ring-color': 'rgba(99,102,241,0.1)' }}
                   type="email" value={email} onChange={e => setEmail(e.target.value)}
                   required autoFocus placeholder="admin@yourcompany.com"
                 />
