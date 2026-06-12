@@ -1,11 +1,36 @@
 import { useState, useMemo } from 'react';
 import { format, subDays, parseISO } from 'date-fns';
-import { Clock, ChevronLeft, ChevronRight, Plus } from 'lucide-react';
+import { Clock, ChevronLeft, ChevronRight, Plus, Download } from 'lucide-react';
 import { useSubscription } from '../context/SubscriptionContext';
 import { fmt } from '../utils/dateTime';
 import { StatusBadge, Avatar, SearchInput, SelectField, SectionHeader, EmptyState, Modal, InputField } from '../components/ui';
 import { useToast } from '../context/ToastContext';
 import { useAuth } from '../context/AuthContext';
+
+function exportToCSV(records, date) {
+  const headers = ['Employee Code', 'First Name', 'Last Name', 'Department', 'Shift', 'Clock In', 'Clock Out', 'Status', 'Notes'];
+  const rows = records.map(r => [
+    r.employee.employeeCode || '',
+    r.employee.firstName,
+    r.employee.lastName,
+    r.employee.department || '',
+    r.shift ? `${r.shift.name} (${r.shift.start}–${r.shift.end})` : '',
+    r.clockIn  || '',
+    r.clockOut || '',
+    r.status,
+    r.notes   || '',
+  ]);
+  const csv = [headers, ...rows]
+    .map(row => row.map(v => `"${String(v).replace(/"/g, '""')}"`).join(','))
+    .join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = `attendance_${date}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
 const STATUSES = ['present', 'late', 'absent', 'half-day'];
 
@@ -84,11 +109,21 @@ export default function AttendancePage() {
         title="Attendance Management"
         description={`${records.length} records for ${fmt.date(date)}`}
         actions={
-          can('edit_all') && (
-            <button className="btn-primary btn-sm" onClick={() => setAddModal(true)}>
-              <Plus size={13} /> Add Record
-            </button>
-          )
+          <div className="flex gap-2">
+            {records.length > 0 && (
+              <button
+                className="btn-secondary btn-sm"
+                onClick={() => { exportToCSV(records, date); toast('Attendance exported to CSV', 'success'); }}
+              >
+                <Download size={13} /> Export CSV
+              </button>
+            )}
+            {can('edit_all') && (
+              <button className="btn-primary btn-sm" onClick={() => setAddModal(true)}>
+                <Plus size={13} /> Add Record
+              </button>
+            )}
+          </div>
         }
       />
 

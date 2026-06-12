@@ -33,7 +33,11 @@ function PrivateRoute({ children, roles }) {
   if (!user) return <Navigate to="/login" replace />;
   if (loading) return <LoadingScreen />;                              // wait for DB load
   if (!subscription) return <Navigate to="/pricing" replace />;
-  if (subscription.status === 'cancelled') return <Navigate to="/pricing" replace />;
+  // Cancelled: allow access only to /app/subscription so they can reactivate
+  if (subscription.status === 'cancelled') {
+    const allowed = window.location.pathname === '/app/subscription';
+    if (!allowed) return <Navigate to="/app/subscription" replace />;
+  }
   if (roles && !roles.includes(user.role)) return <Navigate to="/app/dashboard" replace />;
   return children;
 }
@@ -47,7 +51,8 @@ function PublicRoute({ children }) {
   const { subscription, loading } = useSubscription();
 
   if (loading) return <LoadingScreen />;
-  if (user) return <Navigate to="/app/dashboard" replace />;
+  // Allow logged-in users with cancelled subscriptions to see public pages (e.g. pricing to reactivate)
+  if (user && subscription?.status !== 'cancelled') return <Navigate to="/app/dashboard" replace />;
   return children;
 }
 

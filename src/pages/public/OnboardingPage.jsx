@@ -30,10 +30,10 @@ function generateEmployeeCode() {
 
 /* ── CSV template download ── */
 function downloadCSVTemplate() {
-  const headers = ['firstName', 'lastName', 'email', 'phone', 'role', 'department', 'employeeCode'];
+  const headers = ['firstName', 'middleName', 'lastName', 'suffix', 'email', 'phone', 'role', 'department', 'employeeCode'];
   const examples = [
-    ['Maria', 'Santos', 'm.santos@company.com', '+63 912 345 6789', 'Engineer', 'Engineering', 'ERJ-SAMPLE1'],
-    ['Jose', 'Reyes', 'j.reyes@company.com', '+63 917 987 6543', 'Team Lead', 'Operations', ''],
+    ['Maria', 'Cristina', 'Santos', '', 'm.santos@company.com', '+639123456789', 'Engineer', 'Engineering', 'ERJ-SAMPLE1'],
+    ['Jose', '', 'Reyes', 'Jr.', 'j.reyes@company.com', '+639179876543', 'Team Lead', 'Operations', ''],
   ];
   const rows = [headers, ...examples].map(r => r.map(v => `"${v}"`).join(',')).join('\n');
   const blob = new Blob([rows], { type: 'text/csv' });
@@ -73,7 +73,9 @@ function parseCSV(text) {
 
     employees.push({
       firstName: obj.firstname,
+      middleName: obj.middlename || '',
       lastName: obj.lastname,
+      suffix: obj.suffix || '',
       email: obj.email,
       phone: obj.phone || '',
       role: obj.role || '',
@@ -86,18 +88,57 @@ function parseCSV(text) {
   return { employees, errors };
 }
 
+/* ── Phone helpers ── */
+function toLocalPhone(full) {
+  if (!full) return '';
+  const digits = full.replace(/^\+63/, '').replace(/\D/g, '');
+  return digits.slice(0, 10);
+}
+function toFullPhone(local) {
+  const digits = local.replace(/\D/g, '').slice(0, 10);
+  return digits ? `+63${digits}` : '';
+}
+
+function PhoneField({ value, onChange, label = 'Phone' }) {
+  const local = toLocalPhone(value);
+  function handleChange(e) {
+    const raw = e.target.value.replace(/\D/g, '').slice(0, 10);
+    onChange(toFullPhone(raw));
+  }
+  return (
+    <div>
+      <label className="label">{label}</label>
+      <div className="flex items-stretch rounded-xl border border-surface-300 overflow-hidden focus-within:border-brand-500 focus-within:ring-2 focus-within:ring-brand-100 transition-all"
+        style={{ background: '#fff' }}>
+        <span className="flex items-center px-3 text-sm font-semibold text-ink-500 bg-surface-50 border-r border-surface-200 select-none shrink-0">
+          +63
+        </span>
+        <input
+          type="tel"
+          inputMode="numeric"
+          value={local}
+          onChange={handleChange}
+          placeholder="9xx xxx xxxx"
+          maxLength={10}
+          className="flex-1 px-3 py-2.5 text-sm bg-transparent outline-none text-ink-800 placeholder-ink-300"
+        />
+      </div>
+    </div>
+  );
+}
+
 /* ─────────────────────────────────────────────
    Employee form
 ───────────────────────────────────────────── */
 function EmployeeForm({ onAdd, seatsAvailable, currentPlan, existingCodes, departments }) {
   const activeDepts = departments.length > 0 ? departments : DEPARTMENTS_SUGGESTIONS;
   const [form, setForm] = useState({
-    firstName: '', lastName: '', email: '', phone: '',
+    firstName: '', middleName: '', lastName: '', suffix: '', email: '', phone: '',
     role: '', department: '',
     joinDate: new Date().toISOString().split('T')[0],
-    employeeCode: generateEmployeeCode(),
+    employeeCode: '',
   });
-  const [idMode, setIdMode] = useState('auto');
+  const [idMode, setIdMode] = useState('manual');
   const [errors, setErrors] = useState({});
 
   useEffect(() => {
@@ -134,12 +175,12 @@ function EmployeeForm({ onAdd, seatsAvailable, currentPlan, existingCodes, depar
     if (seatsAvailable === 0) return;
     onAdd({ ...form, employeeCode: form.employeeCode.trim().toUpperCase() });
     setForm({
-      firstName: '', lastName: '', email: '', phone: '',
+      firstName: '', middleName: '', lastName: '', suffix: '', email: '', phone: '',
       role: '', department: activeDepts[0] || '',
       joinDate: new Date().toISOString().split('T')[0],
-      employeeCode: generateEmployeeCode(),
+      employeeCode: '',
     });
-    setIdMode('auto');
+    setIdMode('manual');
     setErrors({});
   }
 
@@ -155,10 +196,15 @@ function EmployeeForm({ onAdd, seatsAvailable, currentPlan, existingCodes, depar
         <InputField label="Last Name" value={form.lastName} onChange={f('lastName')} placeholder="Santos" error={errors.lastName} />
       </div>
 
+      <div className="grid grid-cols-2 gap-3">
+        <InputField label={<span>Middle Name <span className="text-ink-400 font-normal">(optional)</span></span>} value={form.middleName} onChange={f('middleName')} placeholder="Cristina" />
+        <InputField label={<span>Suffix <span className="text-ink-400 font-normal">(optional)</span></span>} value={form.suffix} onChange={f('suffix')} placeholder="Jr., Sr., III…" />
+      </div>
+
       <InputField label="Work Email" type="email" value={form.email} onChange={f('email')} placeholder="m.santos@company.com" error={errors.email} />
 
       <div className="grid grid-cols-2 gap-3">
-        <InputField label="Phone" value={form.phone} onChange={f('phone')} placeholder="+63 9xx xxx xxxx" />
+        <PhoneField value={form.phone} onChange={f('phone')} />
         <InputField label="Start Date" type="date" value={form.joinDate} onChange={f('joinDate')} />
       </div>
 
@@ -188,7 +234,7 @@ function EmployeeForm({ onAdd, seatsAvailable, currentPlan, existingCodes, depar
         <div className="flex items-center justify-between mb-1.5">
           <label className="label mb-0">Employee ID</label>
           <div className="flex items-center gap-1 p-0.5 rounded-lg" style={{ background: '#f1f5f9' }}>
-            {[['auto', <Wand2 size={10} />, 'Auto-generate'], ['manual', <PenLine size={10} />, 'Enter manually']].map(([mode, icon, label]) => (
+            {[['manual', <PenLine size={10} />, 'Enter manually'], ['auto', <Wand2 size={10} />, 'Auto-generate']].map(([mode, icon, label]) => (
               <button key={mode} type="button" onClick={() => handleModeSwitch(mode)}
                 className="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-semibold transition-all"
                 style={{
@@ -270,7 +316,7 @@ export default function OnboardingPage() {
   function handleAdd(employee) {
     try {
       enrollEmployee(employee);
-      toast(`${employee.firstName} ${employee.lastName} enrolled · ${employee.employeeCode}`, 'success');
+      toast(`${[employee.firstName, employee.middleName, employee.lastName, employee.suffix].filter(Boolean).join(' ')} enrolled · ${employee.employeeCode}`, 'success');
     } catch (err) {
       toast(err.message, 'error');
     }
@@ -403,7 +449,7 @@ export default function OnboardingPage() {
               </div>
               <p className="text-[11px] font-semibold text-ink-500 uppercase tracking-wide mt-2">Optional columns</p>
               <div className="flex flex-wrap gap-1">
-                {['phone', 'role', 'department', 'employeeCode'].map(c => (
+                {['middleName', 'suffix', 'phone', 'role', 'department', 'employeeCode'].map(c => (
                   <code key={c} className="text-[11px] px-1.5 py-0.5 rounded bg-surface-100 text-ink-500 font-mono">{c}</code>
                 ))}
               </div>
@@ -463,14 +509,16 @@ export default function OnboardingPage() {
                     onClick={() => setExpanded(expanded === emp.id ? null : emp.id)}>
                     <Avatar name={`${emp.firstName} ${emp.lastName}`} color={emp.avatarColor} size="sm" />
                     <div className="flex-1 min-w-0">
-                      <p className="text-sm font-semibold text-ink-800">{emp.firstName} {emp.lastName}</p>
+                      <p className="text-sm font-semibold text-ink-800">
+                      {[emp.firstName, emp.middleName, emp.lastName, emp.suffix].filter(Boolean).join(' ')}
+                    </p>
                       <p className="text-sm text-ink-400 truncate">{emp.role || '—'} · {emp.department || '—'}</p>
                     </div>
                     <span className="text-[10px] font-mono font-semibold px-2 py-0.5 rounded-md shrink-0"
                       style={{ background: 'rgba(99,102,241,0.08)', color: '#6366f1', letterSpacing: '0.04em' }}>
                       {emp.employeeCode}
                     </span>
-                    <button onClick={e => { e.stopPropagation(); handleRemove(emp.id, `${emp.firstName} ${emp.lastName}`); }}
+                    <button onClick={e => { e.stopPropagation(); handleRemove(emp.id, [emp.firstName, emp.middleName, emp.lastName, emp.suffix].filter(Boolean).join(' ')); }}
                       className="p-1.5 rounded-lg text-ink-300 hover:text-danger-500 hover:bg-danger-50 transition-colors ml-1">
                       <Trash2 size={12} />
                     </button>
@@ -481,6 +529,10 @@ export default function OnboardingPage() {
                     <div className="px-5 pb-4 bg-surface-50 grid grid-cols-2 gap-2 text-sm">
                       {[
                         { l: 'Employee ID', v: emp.employeeCode },
+                        { l: 'First Name', v: emp.firstName },
+                        { l: 'Middle Name', v: emp.middleName || '—' },
+                        { l: 'Last Name', v: emp.lastName },
+                        { l: 'Suffix', v: emp.suffix || '—' },
                         { l: 'Email', v: emp.email },
                         { l: 'Phone', v: emp.phone || '—' },
                         { l: 'Start Date', v: emp.joinDate },

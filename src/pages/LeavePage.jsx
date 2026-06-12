@@ -1,11 +1,37 @@
 import { useState, useMemo } from 'react';
 import { format } from 'date-fns';
-import { Plus, CalendarDays, Pencil, X, Check, Ban } from 'lucide-react';
+import { Plus, CalendarDays, Pencil, X, Check, Ban, Download } from 'lucide-react';
 import { useSubscription } from '../context/SubscriptionContext';
 import { fmt } from '../utils/dateTime';
 import { StatusBadge, Avatar, SearchInput, SelectField, SectionHeader, EmptyState, Modal, InputField } from '../components/ui';
 import { useToast } from '../context/ToastContext';
 import { useAuth } from '../context/AuthContext';
+
+function exportLeaveCSV(list) {
+  const headers = ['Employee Code', 'First Name', 'Last Name', 'Department', 'Leave Type', 'Start Date', 'End Date', 'Reason', 'Status', 'Submitted'];
+  const rows = list.map(r => [
+    r.employee.employeeCode || '',
+    r.employee.firstName,
+    r.employee.lastName,
+    r.employee.department || '',
+    r.leaveType,
+    r.startDate,
+    r.endDate,
+    r.reason || '',
+    r.status,
+    r.createdAt ? format(new Date(r.createdAt), 'yyyy-MM-dd') : '',
+  ]);
+  const csv = [headers, ...rows]
+    .map(row => row.map(v => `"${String(v).replace(/"/g, '""')}"`).join(','))
+    .join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = `leave_requests_${format(new Date(), 'yyyy-MM-dd')}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
 
 const LEAVE_TYPES = ['Sick Leave', 'Vacation Leave', 'Emergency Leave', 'Maternity Leave', 'Paternity Leave', 'Others'];
 
@@ -74,9 +100,19 @@ export default function LeavePage() {
         title="Leave Tracker"
         description={`${leaveRequests.filter(r => r.status === 'pending').length} pending request${leaveRequests.filter(r => r.status === 'pending').length !== 1 ? 's' : ''}`}
         actions={
-          <button className="btn-primary btn-sm" onClick={() => setAddModal(true)}>
-            <Plus size={13} /> New Request
-          </button>
+          <div className="flex gap-2">
+            {filtered.length > 0 && (
+              <button
+                className="btn-secondary btn-sm"
+                onClick={() => { exportLeaveCSV(filtered); toast('Leave data exported to CSV', 'success'); }}
+              >
+                <Download size={13} /> Export CSV
+              </button>
+            )}
+            <button className="btn-primary btn-sm" onClick={() => setAddModal(true)}>
+              <Plus size={13} /> New Request
+            </button>
+          </div>
         }
       />
 
