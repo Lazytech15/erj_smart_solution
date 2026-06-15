@@ -3,21 +3,25 @@ import { useNavigate } from 'react-router-dom';
 import { Check, X, ArrowRight, ArrowLeft, Zap } from 'lucide-react';
 import { PLANS } from '../../context/SubscriptionContext';
 
+// 1. Updated features list with descriptive, customer-friendly hardware terms
 const ALL_FEATURES = [
   'Up to employees limit',
-  'Clock-in / Clock-out',
+  'Manual Web Clock-In / Out', // Changed from generic 'Clock-in / Clock-out'
   'Attendance records',
   'Basic leave management',
   'CSV export',
   'Email support',
-  'Mobile app (iOS & Android)',
+  'Mobile App QR Location Scan', // Changed to reflect Starter plan functionality
+  'Desktop Kiosk (Electron App)', // Added for Growth plan
+  'Barcode / QR ID Badge Support', // Added for Growth plan
   'Shift management',
   'Department management',
   'Analytics & reports',
   'Overtime tracking',
   'SMS notifications',
   'Priority support',
-  'Biometric device integration',
+  'Standalone NFC Hardware Box', // Changed from biometric integration
+  'Smart NFC ID Card Tokens', // Added for Enterprise hardware
   'API access & webhooks',
   'Custom attendance policies',
   'Dedicated account manager',
@@ -30,8 +34,11 @@ const PLAN_CONFIG = {
     colorShadow: 'rgba(38,198,218,0.18)',
     originalPrice: null, discount: null,
     includedFeatures: new Set([
-      'Up to employees limit','Clock-in / Clock-out','Attendance records',
-      'Basic leave management','CSV export',
+      'Up to employees limit',
+      'Manual Web Clock-In / Out', // Only manual entry on web for Free
+      'Attendance records',
+      'Basic leave management',
+      'CSV export',
     ]),
   },
   starter: {
@@ -39,9 +46,13 @@ const PLAN_CONFIG = {
     colorShadow: 'rgba(38,198,218,0.25)',
     originalPrice: null, discount: null,
     includedFeatures: new Set([
-      'Up to employees limit','Clock-in / Clock-out','Attendance records',
-      'Basic leave management','CSV export','Email support',
-      'Mobile app (iOS & Android)',
+      'Up to employees limit',
+      'Manual Web Clock-In / Out',
+      'Attendance records',
+      'Basic leave management',
+      'CSV export',
+      'Email support',
+      'Mobile App QR Location Scan', // Unlocked: Phone-based scanning
     ]),
   },
   growth: {
@@ -49,10 +60,21 @@ const PLAN_CONFIG = {
     colorShadow: 'rgba(38,166,154,0.25)',
     originalPrice: 320, discount: '20% OFF',
     includedFeatures: new Set([
-      'Up to employees limit','Clock-in / Clock-out','Attendance records',
-      'Basic leave management','CSV export','Email support',
-      'Mobile app (iOS & Android)','Shift management','Department management',
-      'Analytics & reports','Overtime tracking','SMS notifications','Priority support',
+      'Up to employees limit',
+      'Manual Web Clock-In / Out',
+      'Attendance records',
+      'Basic leave management',
+      'CSV export',
+      'Email support',
+      'Mobile App QR Location Scan',
+      'Desktop Kiosk (Electron App)', // Unlocked: Entrance Kiosk PC
+      'Barcode / QR ID Badge Support', // Unlocked: Scanner integration
+      'Shift management',
+      'Department management',
+      'Analytics & reports',
+      'Overtime tracking',
+      'SMS notifications',
+      'Priority support',
     ]),
   },
   enterprise: {
@@ -60,12 +82,27 @@ const PLAN_CONFIG = {
     colorShadow: 'rgba(239,83,80,0.25)',
     originalPrice: 530, discount: '25% OFF',
     includedFeatures: new Set([
-      'Up to employees limit','Clock-in / Clock-out','Attendance records',
-      'Basic leave management','CSV export','Email support',
-      'Mobile app (iOS & Android)','Shift management','Department management',
-      'Analytics & reports','Overtime tracking','SMS notifications','Priority support',
-      'Biometric device integration','API access & webhooks',
-      'Custom attendance policies','Dedicated account manager','SLA guarantee',
+      'Up to employees limit',
+      'Manual Web Clock-In / Out',
+      'Attendance records',
+      'Basic leave management',
+      'CSV export',
+      'Email support',
+      'Mobile App QR Location Scan',
+      'Desktop Kiosk (Electron App)',
+      'Barcode / QR ID Badge Support',
+      'Shift management',
+      'Department management',
+      'Analytics & reports',
+      'Overtime tracking',
+      'SMS notifications',
+      'Priority support',
+      'Standalone NFC Hardware Box', // Unlocked: ESP32 Custom Hardware Box
+      'Smart NFC ID Card Tokens', // Unlocked: Physical hardware cards
+      'API access & webhooks',
+      'Custom attendance policies',
+      'Dedicated account manager',
+      'SLA guarantee',
     ]),
   },
 };
@@ -77,12 +114,24 @@ function getFeatureLabel(feature, plan) {
   return feature;
 }
 
-// Section headers to visually group features
+// 2. Clearer structural layout grouping your tracking hardware strategies
 const FEATURE_GROUPS = [
-  { label: 'Core', features: ['Up to employees limit','Clock-in / Clock-out','Attendance records','Basic leave management','CSV export'] },
-  { label: 'Communication', features: ['Email support','Mobile app (iOS & Android)','SMS notifications'] },
-  { label: 'Team Management', features: ['Shift management','Department management','Analytics & reports','Overtime tracking','Priority support'] },
-  { label: 'Enterprise', features: ['Biometric device integration','API access & webhooks','Custom attendance policies','Dedicated account manager','SLA guarantee'] },
+  { 
+    label: 'Core & Basics', 
+    features: ['Up to employees limit', 'Manual Web Clock-In / Out', 'Attendance records', 'Basic leave management', 'CSV export'] 
+  },
+  { 
+    label: 'Mobile & On-Site Hardware', 
+    features: ['Mobile App QR Location Scan', 'Desktop Kiosk (Electron App)', 'Barcode / QR ID Badge Support', 'Standalone NFC Hardware Box', 'Smart NFC ID Card Tokens'] 
+  },
+  { 
+    label: 'Team Management & Comms', 
+    features: ['Shift management', 'Department management', 'Analytics & reports', 'Overtime tracking', 'SMS notifications', 'Email support', 'Priority support'] 
+  },
+  { 
+    label: 'Enterprise Infrastructure', 
+    features: ['API access & webhooks', 'Custom attendance policies', 'Dedicated account manager', 'SLA guarantee'] 
+  },
 ];
 
 export default function PricingPage() {
@@ -237,7 +286,7 @@ export default function PricingPage() {
               { q: 'What happens after the free trial?', a: 'After 14 days your workspace enters read-only mode. Upgrade to any paid plan to continue without losing data.' },
               { q: 'How does per-employee billing work?', a: 'You only pay for employees you manually enroll. Removed employees are not billed in the next cycle.' },
               { q: 'Can I change plans later?', a: 'Yes — upgrade or downgrade anytime from Settings > Subscription. Changes apply immediately.' },
-              { q: 'Is there a setup fee?', a: 'None. Start your free trial with no payment required, then pay monthly per enrolled employee.' },
+              { q: 'Is there a setup fee?', a: 'None for software. Custom NFC hardware setups in the Enterprise tier require a separate device lease agreement.' },
             ].map(({ q, a }) => (
               <div key={q} className="p-4 rounded-xl bg-white border border-slate-100">
                 <p className="text-xs font-semibold text-slate-800 mb-1.5">{q}</p>
