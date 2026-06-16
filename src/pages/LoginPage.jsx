@@ -5,6 +5,7 @@ import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { Spinner } from '../components/ui';
 import TransitionLoadingScreen from '../components/TransitionLoadingScreen';
+import { getSubscription } from '../utils/db';
 
 const FEATURES = [
   { icon: Clock, label: 'Real-time attendance tracking' },
@@ -23,16 +24,26 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [transitioning, setTransitioning] = useState(false);
+  // Holds the in-flight subscription fetch so TransitionLoadingScreen can
+  // watch it and pace the progress bar to real network timing.
+  const [subscriptionPromise, setSubscriptionPromise] = useState(null);
 
   async function handleSubmit(e) {
     e.preventDefault();
     setError('');
     setLoading(true);
     try {
-      await login(email, password);
-      // login() only validates + stores pending user, does NOT set auth state yet.
-      // Show transition first; commitLogin() fires inside onComplete.
+      const user = await login(email, password);
       toast('Welcome back!', 'success');
+
+      // Kick off the subscription fetch immediately — don't await it here.
+      // Pass the promise to TransitionLoadingScreen so the progress bar
+      // pauses at ~70% and waits for this to resolve before finishing.
+      const subPromise = user?.subscriptionId
+        ? getSubscription(user.subscriptionId)
+        : Promise.resolve(null);
+
+      setSubscriptionPromise(subPromise);
       setTransitioning(true);
     } catch (err) {
       setError(err.message);
@@ -40,13 +51,16 @@ export default function LoginPage() {
     }
   }
 
-  // Shown after successful login — plays progress bar before navigating
   if (transitioning) {
     return (
       <TransitionLoadingScreen
         label="Signing you in…"
+        promise={subscriptionPromise}
         onComplete={() => {
-          commitLogin();           // now set user → PublicRoute will no longer block
+          // By the time onComplete fires, the subscription fetch is done.
+          // commitLogin sets user state — SubscriptionContext will re-run
+          // its effect but the data is already cached/fetched so it's instant.
+          commitLogin();
           navigate('/app/dashboard');
         }}
       />

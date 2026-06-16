@@ -10,6 +10,7 @@
     "lint": "eslint src --ext .js,.jsx"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.108.2",
     "axios": "^1.7.2",
     "date-fns": "^3.6.0",
     "framer-motion": "^11.2.10",

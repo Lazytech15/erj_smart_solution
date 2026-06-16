@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { SubscriptionProvider, useSubscription } from './context/SubscriptionContext';
 import { ToastProvider } from './context/ToastContext';
@@ -23,82 +23,80 @@ import SettingsPage from './pages/SettingsPage';
 import SubscriptionPage from './pages/SubscriptionPage';
 
 /**
- * Guard: requires a valid active subscription.
- * Waits for the async IndexedDB load before redirecting (avoids flash).
+ * Guard: requires auth + a valid subscription.
+ * By the time a user reaches here after login, the subscription is already
+ * fetched (TransitionLoadingScreen waited for it), so loading is near-instant.
  */
-function PrivateRoute({ children, roles }) {
+function PrivateRoute({ children }) {
   const { user } = useAuth();
   const { subscription, loading } = useSubscription();
+  const location = useLocation();
 
   if (!user) return <Navigate to="/login" replace />;
-  if (loading) return <LoadingScreen />;                              // wait for DB load
+  if (loading) return <LoadingScreen />;
   if (!subscription) return <Navigate to="/pricing" replace />;
-  // Cancelled: allow access only to /app/subscription so they can reactivate
-  if (subscription.status === 'cancelled') {
-    const allowed = window.location.pathname === '/app/subscription';
-    if (!allowed) return <Navigate to="/app/subscription" replace />;
+
+  if (subscription.status === 'cancelled' && location.pathname !== '/app/subscription') {
+    return <Navigate to="/app/subscription" replace />;
   }
-  if (roles && !roles.includes(user.role)) return <Navigate to="/app/dashboard" replace />;
+
+  return children;
+}
+
+/**
+ * Role-only guard — only used for nested routes already inside a PrivateRoute.
+ */
+function RoleRoute({ children, roles }) {
+  const { user } = useAuth();
+  if (roles && !roles.includes(user?.role)) return <Navigate to="/app/dashboard" replace />;
   return children;
 }
 
 /**
  * Guard for pages that should only be visible when NOT logged in.
- * Does NOT cover /onboard — that page handles its own auth check.
+ *
+ * Waits for both loading===false AND subscription to be resolved before
+ * redirecting, to avoid the one-frame gap after commitLogin() where user is
+ * set but subscription is still null — which would cause an infinite loop.
  */
 function PublicRoute({ children }) {
   const { user } = useAuth();
   const { subscription, loading } = useSubscription();
 
-  if (loading) return <LoadingScreen />;
-  // Allow logged-in users with cancelled subscriptions to see public pages (e.g. pricing to reactivate)
-  if (user && subscription?.status !== 'cancelled') return <Navigate to="/app/dashboard" replace />;
+  if (user && (loading || !subscription)) return <LoadingScreen />;
+  if (user && subscription.status !== 'cancelled') return <Navigate to="/app/dashboard" replace />;
   return children;
 }
 
 /**
- * Shows the loading splash on the very first page load (e.g. hard refresh),
- * then fades it out once the app shell has mounted. Keeps a minimum
- * display time so it doesn't just flash for a frame on fast connections.
+ * Shows the ERJ splash screen on the very first hard load of the session.
+ * Uses sessionStorage so it only ever shows once — re-renders caused by
+ * state changes (e.g. commitLogin) will never bring it back.
  */
+const SPLASH_KEY = 'erj_splash_shown';
+
 function FirstLoadGate({ children }) {
-  const [visible, setVisible] = useState(true);
+  const alreadySeen = sessionStorage.getItem(SPLASH_KEY) === '1';
+  const [visible, setVisible] = useState(!alreadySeen);
   const [fading, setFading] = useState(false);
-  // Initialize synchronously — if the page is already loaded (common in SPAs
-  // after a hot-reload or navigation), readyState is already 'complete' before
-  // this component even mounts, so the useEffect listener would never fire.
-  const [appReady, setAppReady] = useState(() => document.readyState === 'complete');
 
-  // Only attach the listener when the page hasn't finished loading yet
-  useEffect(() => {
-    if (document.readyState === 'complete') {
-      // Already ready (handles the race where readyState changed between the
-      // useState initializer and the effect running)
-      setAppReady(true);
-      return;
-    }
-    const onLoad = () => setAppReady(true);
-    window.addEventListener('load', onLoad);
-    return () => window.removeEventListener('load', onLoad);
-  }, []);
-
-  // Called by LoadingScreen once its progress bar finishes at 100%
   const handleLoadComplete = () => {
+    sessionStorage.setItem(SPLASH_KEY, '1');
     setFading(true);
-    setTimeout(() => setVisible(false), 320); // matches fade-out transition
+    setTimeout(() => setVisible(false), 320);
   };
+
+  if (!visible) return children;
 
   return (
     <>
       {children}
-      {visible && (
-        <div className={`erj-first-load${fading ? ' erj-first-load--out' : ''}`}>
-          <LoadingScreen
-            label="Loading…"
-            onComplete={appReady ? handleLoadComplete : undefined}
-          />
-        </div>
-      )}
+      <div className={`erj-first-load${fading ? ' erj-first-load--out' : ''}`}>
+        <LoadingScreen
+          label="Loading…"
+          onComplete={handleLoadComplete}
+        />
+      </div>
     </>
   );
 }
@@ -112,26 +110,20 @@ function AppRoutes() {
       <Route path="/signup"  element={<PublicRoute><SignupPage /></PublicRoute>} />
       <Route path="/login"   element={<PublicRoute><LoginPage /></PublicRoute>} />
 
-      {/*
-        /onboard is intentionally NOT wrapped in PublicRoute.
-        After signup the user is logged in + has a subscription, so PublicRoute
-        would immediately redirect them to /app/dashboard.
-        OnboardingPage does its own check: if no subscription → /pricing.
-      */}
       <Route path="/onboard" element={<OnboardingPage />} />
 
       {/* ── Authenticated app ── */}
       <Route path="/app" element={<PrivateRoute><AppLayout /></PrivateRoute>}>
         <Route index element={<Navigate to="/app/dashboard" replace />} />
-        <Route path="dashboard"   element={<DashboardPage />} />
-        <Route path="attendance"  element={<AttendancePage />} />
-        <Route path="employees"   element={<PrivateRoute roles={['admin','hr','manager']}><EmployeesPage /></PrivateRoute>} />
-        <Route path="leave"       element={<LeavePage />} />
-        <Route path="reports"     element={<PrivateRoute roles={['admin','hr','manager']}><ReportsPage /></PrivateRoute>} />
-        <Route path="shifts"      element={<PrivateRoute roles={['admin','hr']}><ShiftsPage /></PrivateRoute>} />
-        <Route path="departments" element={<PrivateRoute roles={['admin','hr']}><DepartmentsPage /></PrivateRoute>} />
-        <Route path="settings"    element={<PrivateRoute roles={['admin']}><SettingsPage /></PrivateRoute>} />
-        <Route path="subscription" element={<PrivateRoute roles={['admin']}><SubscriptionPage /></PrivateRoute>} />
+        <Route path="dashboard"    element={<DashboardPage />} />
+        <Route path="attendance"   element={<AttendancePage />} />
+        <Route path="leave"        element={<LeavePage />} />
+        <Route path="subscription" element={<RoleRoute roles={['admin']}><SubscriptionPage /></RoleRoute>} />
+        <Route path="employees"    element={<RoleRoute roles={['admin','hr','manager']}><EmployeesPage /></RoleRoute>} />
+        <Route path="reports"      element={<RoleRoute roles={['admin','hr','manager']}><ReportsPage /></RoleRoute>} />
+        <Route path="shifts"       element={<RoleRoute roles={['admin','hr']}><ShiftsPage /></RoleRoute>} />
+        <Route path="departments"  element={<RoleRoute roles={['admin','hr']}><DepartmentsPage /></RoleRoute>} />
+        <Route path="settings"     element={<RoleRoute roles={['admin']}><SettingsPage /></RoleRoute>} />
       </Route>
 
       <Route path="*" element={<Navigate to="/" replace />} />
@@ -142,7 +134,6 @@ function AppRoutes() {
 export default function App() {
   return (
     <BrowserRouter>
-      {/* AuthProvider MUST be outer — SubscriptionProvider depends on useAuth() */}
       <AuthProvider>
         <SubscriptionProvider>
           <ToastProvider>

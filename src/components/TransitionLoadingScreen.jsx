@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useLayoutEffect, useRef } from "react";
 
 const keyframes = `
   @keyframes tls-fadein {
@@ -60,8 +60,6 @@ const styles = {
     width: "0%",
     background: "linear-gradient(90deg, #1D4ED8, #2563EB, #3B82F6)",
     borderRadius: 99,
-    // NO CSS transition — RAF writes width directly every frame.
-    // A CSS transition fights RAF and causes stuttering / snap-back.
   },
   dots: {
     display: "flex",
@@ -77,46 +75,88 @@ const styles = {
   },
 };
 
-export default function TransitionLoadingScreen({ label = "Loading…", onComplete }) {
-  const fillRef       = useRef(null);
-  const pctRef        = useRef(null);
-  const labelRef      = useRef(null);
-  const rafRef        = useRef(null);
-  const doneRef       = useRef(false);
-  const progressRef   = useRef(0);
-  // Store onComplete in a ref so the effect never needs it as a dependency.
-  // An inline arrow passed from the parent is a new reference every render,
-  // which would restart the effect (and reset progress) on every re-render.
+/**
+ * Stage definitions: [minProgress, maxProgress, label]
+ * The bar animates freely through stages until it hits WAIT_AT.
+ * Once `promise` resolves it races to 100% and fires onComplete.
+ */
+const STAGES = [
+  [0,  30, "Signing you in…"],
+  [30, 60, "Loading your workspace…"],
+  [60, 85, "Almost there…"],
+  [85, 100, "Ready!"],
+];
+
+/**
+ * The bar will animate freely up to this point, then pause and wait
+ * for the `promise` prop to resolve before continuing to 100%.
+ */
+const WAIT_AT = 70;
+
+const getStageLabel = (p) =>
+  STAGES.find(([min, max]) => p >= min && p < max)?.[2] ?? "Ready!";
+
+/**
+ * TransitionLoadingScreen
+ *
+ * Props:
+ *   label      – initial status text (overridden by stage labels as progress advances)
+ *   promise    – optional Promise to wait for before the bar completes.
+ *                The bar animates freely to WAIT_AT%, then pauses until the
+ *                promise resolves, then races to 100% and calls onComplete.
+ *                Without a promise the bar runs straight through to 100%.
+ *   onComplete – called after the bar reaches 100% and a short pause elapses.
+ */
+export default function TransitionLoadingScreen({ label = "Loading…", promise, onComplete }) {
+  const fillRef     = useRef(null);
+  const pctRef      = useRef(null);
+  const labelRef    = useRef(null);
+  const rafRef      = useRef(null);
+  const timerRef    = useRef(null);
+  const doneRef     = useRef(false);
+  const progressRef = useRef(0);
+  // True once the promise has resolved (or if no promise was given)
+  const readyRef    = useRef(!promise);
+
+  // useLayoutEffect keeps these refs current before any RAF tick reads them
   const onCompleteRef = useRef(onComplete);
+  useLayoutEffect(() => { onCompleteRef.current = onComplete; });
 
-  const stages = [
-    [0,  30, label],
-    [30, 65, "Setting up your workspace…"],
-    [65, 90, "Almost there…"],
-    [90, 100, "Ready!"],
-  ];
-
-  const getStageLabel = (p) =>
-    stages.find(([min, max]) => p >= min && p < max)?.[2] ?? "Ready!";
+  const promiseRef = useRef(promise);
+  useLayoutEffect(() => { promiseRef.current = promise; });
 
   useEffect(() => {
-    // Keep the ref current if the parent swaps the callback (rare but safe)
-    onCompleteRef.current = onComplete;
-  });
-
-  // Empty dep array → runs exactly once on mount, never restarts
-  useEffect(() => {
-    // Reset in case React StrictMode unmounted + remounted this component
-    doneRef.current = false;
+    // Reset — handles React StrictMode double-invoke
+    doneRef.current   = false;
     progressRef.current = 0;
+    readyRef.current  = !promiseRef.current;
+
+    // Watch the promise and flip readyRef when it settles
+    if (promiseRef.current) {
+      promiseRef.current
+        .then(() => { readyRef.current = true; })
+        .catch(() => { readyRef.current = true; }); // still proceed on error
+    }
 
     const tick = () => {
       if (doneRef.current) return;
 
       const p = progressRef.current;
-      const speed = p < 50 ? 0.7 : p < 80 ? 0.45 : p < 95 ? 0.2 : 0.08;
-      progressRef.current = Math.min(100, p + speed);
 
+      // Determine speed:
+      // - Before WAIT_AT: animate freely (slowing as we approach the hold point)
+      // - At/past WAIT_AT and waiting: creep very slowly (shows progress, not stuck)
+      // - Once ready: race to 100%
+      let speed;
+      if (readyRef.current) {
+        speed = p < 95 ? 1.2 : 0.5; // fast finish once data is ready
+      } else if (p >= WAIT_AT) {
+        speed = 0.04; // barely moving — visually "waiting" without freezing
+      } else {
+        speed = p < 40 ? 0.7 : p < 60 ? 0.45 : 0.25;
+      }
+
+      progressRef.current = Math.min(100, p + speed);
       const rounded = Math.floor(progressRef.current);
 
       if (fillRef.current)  fillRef.current.style.width  = progressRef.current.toFixed(2) + "%";
@@ -125,9 +165,12 @@ export default function TransitionLoadingScreen({ label = "Loading…", onComple
 
       if (progressRef.current >= 100) {
         doneRef.current = true;
-        if (fillRef.current) fillRef.current.style.width = "100%";
-        if (pctRef.current)  pctRef.current.textContent  = "100%";
-        setTimeout(() => { if (onCompleteRef.current) onCompleteRef.current(); }, 420);
+        if (fillRef.current)  fillRef.current.style.width  = "100%";
+        if (pctRef.current)   pctRef.current.textContent   = "100%";
+        if (labelRef.current) labelRef.current.textContent = "Done!";
+        timerRef.current = setTimeout(() => {
+          onCompleteRef.current?.();
+        }, 420);
         return;
       }
 
@@ -135,11 +178,13 @@ export default function TransitionLoadingScreen({ label = "Loading…", onComple
     };
 
     rafRef.current = requestAnimationFrame(tick);
+
     return () => {
       cancelAnimationFrame(rafRef.current);
+      clearTimeout(timerRef.current);
       doneRef.current = true;
     };
-  }, []); // <-- intentionally empty: animation must run once, start to finish
+  }, []);
 
   return (
     <>

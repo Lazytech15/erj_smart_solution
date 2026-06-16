@@ -1,79 +1,85 @@
-/**
- * db.js — IndexedDB wrapper for ERJ attendance management system
- *
- * Database layout
- * ───────────────
- * DB name : attms_db
- * Stores  :
- *   accounts        – all registered user accounts (keyed by email)
- *   subscriptions   – one record per tenant, keyed by subscriptionId
- *
- * All subscription data (employees, attendance, leaves, shifts, departments,
- * settings) lives inside the single  subscriptions  record for that tenant.
- * This keeps each subscriber's data fully isolated.
- */
-
-const DB_NAME    = 'attms_db';
-const DB_VERSION = 1;
-
-function openDB() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-
-    req.onupgradeneeded = (e) => {
-      const db = e.target.result;
-      if (!db.objectStoreNames.contains('accounts')) {
-        db.createObjectStore('accounts', { keyPath: 'email' });
-      }
-      if (!db.objectStoreNames.contains('subscriptions')) {
-        db.createObjectStore('subscriptions', { keyPath: 'subscriptionId' });
-      }
-    };
-
-    req.onsuccess = (e) => resolve(e.target.result);
-    req.onerror   = (e) => reject(e.target.error);
-  });
-}
-
-// ── Generic helpers ──────────────────────────────────────────────────────────
-
-async function dbGet(store, key) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx  = db.transaction(store, 'readonly');
-    const req = tx.objectStore(store).get(key);
-    req.onsuccess = () => resolve(req.result ?? null);
-    req.onerror   = () => reject(req.error);
-  });
-}
-
-async function dbPut(store, value) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx  = db.transaction(store, 'readwrite');
-    const req = tx.objectStore(store).put(value);
-    req.onsuccess = () => resolve(req.result);
-    req.onerror   = () => reject(req.error);
-  });
-}
-
-async function dbGetAll(store) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx  = db.transaction(store, 'readonly');
-    const req = tx.objectStore(store).getAll();
-    req.onsuccess = () => resolve(req.result);
-    req.onerror   = () => reject(req.error);
-  });
-}
+import { supabase } from './supabase';
 
 // ── Account helpers ──────────────────────────────────────────────────────────
 
-export async function getAccount(email)       { return dbGet('accounts', email); }
-export async function putAccount(account)     { return dbPut('accounts', account); }
-export async function getAllAccounts()        { return dbGetAll('accounts'); }
+export async function getAccount(email) {
+  const { data, error } = await supabase
+    .from('accounts')
+    .select('*')
+    .eq('email', email)
+    .single();
+  if (error) return null;
+  // Map snake_case columns to camelCase so the rest of the app
+  // can use consistent field names (subscriptionId, employeeId, etc.)
+  return {
+    email:          data.email,
+    password:       data.password,
+    role:           data.role,
+    name:           data.name,
+    id:             data.id,
+    employeeId:     data.employee_id,
+    subscriptionId: data.subscription_id,
+    createdAt:      data.created_at,
+  };
+}
+
+export async function putAccount(account) {
+  const { error } = await supabase
+    .from('accounts')
+    .upsert({
+      email:           account.email,
+      password:        account.password,
+      role:            account.role,
+      name:            account.name,
+      id:              account.id,
+      employee_id:     account.employeeId     ?? null,
+      subscription_id: account.subscriptionId ?? null,
+    });
+  if (error) throw error;
+}
 
 // ── Subscription helpers ─────────────────────────────────────────────────────
 
-export async function getSubscription(id)    { return dbGet('subscriptions', id); }
-export async function putSubscription(state) { return dbPut('subscriptions', state); }
+export async function getSubscription(subscriptionId) {
+  const { data, error } = await supabase
+    .from('subscriptions')
+    .select('*')
+    .eq('subscription_id', subscriptionId)
+    .single();
+  if (error) return null;
+  return {
+    subscriptionId:    data.subscription_id,
+    planId:            data.plan_id,
+    company:           data.company,
+    billing:           data.billing,
+    enrolledEmployees: data.enrolled_employees ?? [],
+    departments:       data.departments        ?? [],
+    shifts:            data.shifts             ?? [],
+    attendanceRecords: data.attendance_records ?? [],
+    leaveRequests:     data.leave_requests     ?? [],
+    settings:          data.settings           ?? {},
+    status:            data.status,
+    trialEndsAt:       data.trial_ends_at,
+    createdAt:         data.created_at,
+  };
+}
+
+export async function putSubscription(state) {
+  const { error } = await supabase
+    .from('subscriptions')
+    .upsert({
+      subscription_id:    state.subscriptionId,
+      plan_id:            state.planId,
+      company:            state.company,
+      billing:            state.billing,
+      enrolled_employees: state.enrolledEmployees ?? [],
+      departments:        state.departments        ?? [],
+      shifts:             state.shifts             ?? [],
+      attendance_records: state.attendanceRecords  ?? [],
+      leave_requests:     state.leaveRequests      ?? [],
+      settings:           state.settings           ?? {},
+      status:             state.status,
+      trial_ends_at:      state.trialEndsAt        ?? null,
+    });
+  if (error) throw error;
+}
