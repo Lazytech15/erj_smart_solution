@@ -1,8 +1,12 @@
 name = "erj_smart_solution"
 compatibility_date = "2024-01-01"
 
+[assets]
+directory = "./dist"
+
 [build]
 command = "npm run build"
 
-[env.production]
-vars = { VITE_SUPABASE_URL = "https://cwikhqnvptblfupcolio.supabase.co", VITE_SUPABASE_ANON_KEY = "sb_publishable_WpyhUvdOHKWAr4Hy0RsM_w_zik6yHA7" }
+[vars]
+VITE_SUPABASE_URL = "https://cwikhqnvptblfupcolio.supabase.co"
+VITE_SUPABASE_ANON_KEY = "sb_publishable_WpyhUvdOHKWAr4Hy0RsM_w_zik6yHA7"
