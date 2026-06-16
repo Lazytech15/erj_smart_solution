@@ -47,11 +47,19 @@ export default function EmployeesPage() {
   const [pendingTarget, setPendingTarget] = useState(null);   // employee pending approval
   const [pendingAction, setPendingAction] = useState(null);   // 'approve' | 'reject' | 'edit'
   const [showRegisterLink, setShowRegisterLink] = useState(false);
+  const [sortKey, setSortKey] = useState('lastName');
+  const [sortDir, setSortDir] = useState('asc');
+
+  function toggleSort(key) {
+    if (sortKey === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    else { setSortKey(key); setSortDir('asc'); }
+  }
 
   const employees = useMemo(() => {
     let list = EMPLOYEES.map(e => ({
       ...e,
       fullName: [e.firstName, e.middleName, e.lastName, e.suffix].filter(Boolean).join(' '),
+      displayName: [e.lastName, [e.firstName, e.middleName, e.suffix].filter(Boolean).join(' ')].filter(Boolean).join(', '),
     }));
     if (search) list = list.filter(e =>
       e.fullName.toLowerCase().includes(search.toLowerCase()) ||
@@ -60,8 +68,17 @@ export default function EmployeesPage() {
     );
     if (dept !== 'all') list = list.filter(e => e.department === dept);
     if (status !== 'all') list = list.filter(e => e.status === status);
+    list.sort((a, b) => {
+      let av = '', bv = '';
+      if (sortKey === 'lastName') { av = a.lastName || ''; bv = b.lastName || ''; }
+      else if (sortKey === 'department') { av = a.department || ''; bv = b.department || ''; }
+      else if (sortKey === 'role') { av = a.role || ''; bv = b.role || ''; }
+      else if (sortKey === 'joinDate') { av = a.joinDate || ''; bv = b.joinDate || ''; }
+      const cmp = av.localeCompare(bv);
+      return sortDir === 'asc' ? cmp : -cmp;
+    });
     return list;
-  }, [EMPLOYEES, search, dept, status]);
+  }, [EMPLOYEES, search, dept, status, sortKey, sortDir]);
 
   function handleAdd(form) {
     try {
@@ -254,13 +271,22 @@ export default function EmployeesPage() {
               <table className="table">
                 <thead>
                   <tr>
-                    <th className="text-center">Employee</th>
+                    <th className="text-left pl-3 cursor-pointer select-none" onClick={() => toggleSort('lastName')}>
+                      <span className="flex items-center gap-1">Employee {sortKey === 'lastName' ? (sortDir === 'asc' ? '↑' : '↓') : <span className="text-ink-300">↕</span>}</span>
+                    </th>
                     <th className="text-center">Code</th>
-                    <th className="text-center">Department</th>
-                    <th className="text-center">Role</th>
-                    <th className="text-center">Joined</th>
+                    <th className="text-center cursor-pointer select-none" onClick={() => toggleSort('department')}>
+                      <span className="flex items-center justify-center gap-1">Department {sortKey === 'department' ? (sortDir === 'asc' ? '↑' : '↓') : <span className="text-ink-300">↕</span>}</span>
+                    </th>
+                    <th className="text-center cursor-pointer select-none" onClick={() => toggleSort('role')}>
+                      <span className="flex items-center justify-center gap-1">Role {sortKey === 'role' ? (sortDir === 'asc' ? '↑' : '↓') : <span className="text-ink-300">↕</span>}</span>
+                    </th>
+                    <th className="text-center cursor-pointer select-none" onClick={() => toggleSort('joinDate')}>
+                      <span className="flex items-center justify-center gap-1">Joined {sortKey === 'joinDate' ? (sortDir === 'asc' ? '↑' : '↓') : <span className="text-ink-300">↕</span>}</span>
+                    </th>
                     <th className="text-center">Status</th>
                     {can('edit_all') && <th className="text-center">Actions</th>}
+                    {can('edit_all') && <th className="text-center">Active</th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -268,11 +294,11 @@ export default function EmployeesPage() {
                     <tr><td colSpan={7}><EmptyState title="No employees found" description="Try adjusting your filters." /></td></tr>
                   ) : employees.map(emp => (
                     <tr key={emp.id} className="cursor-pointer hover:bg-surface-50 transition-colors" onClick={() => setAnalyticsTarget(emp)}>
-                      <td className="text-center">
-                        <div className="flex items-center justify-center gap-2.5">
+                      <td className="text-left pl-3">
+                        <div className="flex items-center gap-2.5">
                           <Avatar name={`${emp.firstName} ${emp.lastName}`} color={emp.avatarColor} size="sm" src={emp.profilePhotoUrl} />
                           <div className="text-left">
-                            <p className="font-semibold text-xs text-ink-800">{[emp.firstName, emp.middleName, emp.lastName, emp.suffix].filter(Boolean).join(' ')}</p>
+                            <p className="font-semibold text-xs text-ink-800">{emp.displayName}</p>
                             <p className="text-[11px] text-ink-400">{emp.email}</p>
                           </div>
                         </div>
@@ -284,23 +310,27 @@ export default function EmployeesPage() {
                       <td className="text-center"><StatusBadge status={emp.status} /></td>
                       {can('edit_all') && (
                         <td className="text-center" onClick={e => e.stopPropagation()}>
-                          <div className="flex items-center justify-center gap-1.5">
-                            <button onClick={() => setSelected(emp)} className="btn-ghost btn-sm p-2 rounded-md" title="View profile"><Eye size={16} /></button>
-                            <button onClick={() => setAnalyticsTarget(emp)} className="btn-ghost btn-sm p-2 rounded-md text-brand-500" title="View analytics"><BarChart2 size={16} /></button>
+                          <div className="flex items-center justify-center gap-2">
+                            <button onClick={() => setSelected(emp)} className="btn-ghost btn-sm p-2 rounded-md" title="View profile"><Eye size={18} /></button>
+                            <button onClick={() => setAnalyticsTarget(emp)} className="btn-ghost btn-sm p-2 rounded-md text-brand-500" title="View analytics"><BarChart2 size={18} /></button>
                             <button
                               onClick={() => { setEditTarget(emp); setEditModal(true); }}
                               className="btn-ghost btn-sm p-2 rounded-md"
                               title="Edit employee"
-                            ><Pencil size={16} /></button>
-                            <button
-                              onClick={() => handleToggleStatus(emp)}
-                              className={`btn-ghost btn-sm p-2 rounded-md ${emp.status === 'active' ? 'text-success-600 hover:bg-success-50' : 'text-ink-400 hover:bg-surface-100'}`}
-                              title={emp.status === 'active' ? 'Mark as inactive' : 'Mark as active'}
-                            >
-                              {emp.status === 'active' ? <ToggleRight size={18} /> : <ToggleLeft size={18} />}
-                            </button>
-                            <button onClick={() => handleRemove(emp)} className="btn-ghost btn-sm p-2 rounded-md text-danger-500 hover:bg-danger-50" title="Remove"><Trash2 size={16} /></button>
+                            ><Pencil size={18} /></button>
+                            <button onClick={() => handleRemove(emp)} className="btn-ghost btn-sm p-2 rounded-md text-danger-500 hover:bg-danger-50" title="Remove"><Trash2 size={18} /></button>
                           </div>
+                        </td>
+                      )}
+                      {can('edit_all') && (
+                        <td className="text-center" onClick={e => e.stopPropagation()}>
+                          <button
+                            onClick={() => handleToggleStatus(emp)}
+                            className={`p-1.5 rounded-md transition-colors ${emp.status === 'active' ? 'text-success-600 hover:bg-success-50' : 'text-ink-300 hover:bg-surface-100'}`}
+                            title={emp.status === 'active' ? 'Mark as inactive' : 'Mark as active'}
+                          >
+                            {emp.status === 'active' ? <ToggleRight size={26} /> : <ToggleLeft size={26} />}
+                          </button>
                         </td>
                       )}
                     </tr>
@@ -1281,7 +1311,10 @@ function PendingConfirmModal({ pending, action, onClose, onEdit, onConfirm, seat
 ───────────────────────────────────────────── */
 function RegisterLinkModal({ onClose }) {
   const [copied, setCopied] = useState(false);
-  const url = `${window.location.origin}/register`;
+  const { subscription } = useSubscription();
+  const url = subscription?.subscriptionId
+    ? `${window.location.origin}/register?sub=${subscription.subscriptionId}`
+    : `${window.location.origin}/register`;
 
   function copy() {
     navigator.clipboard.writeText(url).then(() => {

@@ -98,7 +98,8 @@ export default function EmployeeRegisterPage() {
 
   function handleSubmit() {
     if (!validate()) return;
-    submitRegistration(subscription?.subscriptionId, {
+    const subId = searchParams.get('sub') || subscription?.subscriptionId;
+    submitRegistration(subId, {
       ...form,
       employeeCode: form.employeeCode.trim().toUpperCase(),
     });
