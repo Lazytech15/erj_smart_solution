@@ -36,6 +36,7 @@ export default function EmployeesPage() {
 
   const [search, setSearch] = useState('');
   const [dept, setDept] = useState('all');
+  const [role, setRole] = useState('all');         // ← NEW: role filter state
   const [status, setStatus] = useState('all');
   const [view, setView] = useState('table');
   const [addModal, setAddModal] = useState(false);
@@ -55,6 +56,12 @@ export default function EmployeesPage() {
     else { setSortKey(key); setSortDir('asc'); }
   }
 
+  // ← NEW: derive unique sorted role options from enrolled employees
+  const roleOptions = useMemo(() => {
+    const unique = Array.from(new Set(EMPLOYEES.map(e => e.role).filter(Boolean))).sort();
+    return [{ value: 'all', label: 'All Roles' }, ...unique.map(r => ({ value: r, label: r }))];
+  }, [EMPLOYEES]);
+
   const employees = useMemo(() => {
     let list = EMPLOYEES.map(e => ({
       ...e,
@@ -67,6 +74,7 @@ export default function EmployeesPage() {
       e.email.toLowerCase().includes(search.toLowerCase())
     );
     if (dept !== 'all') list = list.filter(e => e.department === dept);
+    if (role !== 'all') list = list.filter(e => e.role === role);   // ← NEW: apply role filter
     if (status !== 'all') list = list.filter(e => e.status === status);
     list.sort((a, b) => {
       let av = '', bv = '';
@@ -78,7 +86,7 @@ export default function EmployeesPage() {
       return sortDir === 'asc' ? cmp : -cmp;
     });
     return list;
-  }, [EMPLOYEES, search, dept, status, sortKey, sortDir]);
+  }, [EMPLOYEES, search, dept, role, status, sortKey, sortDir]);
 
   function handleAdd(form) {
     try {
@@ -252,6 +260,10 @@ export default function EmployeesPage() {
             <SearchInput value={search} onChange={setSearch} placeholder="Search by name, code, email…" className="w-64" />
             <SelectField value={dept} onChange={setDept} className="w-48"
               options={[{ value: 'all', label: 'All Departments' }, ...DEPARTMENTS.map(d => ({ value: d, label: d }))]}
+            />
+            {/* ── NEW: Role filter dropdown ── */}
+            <SelectField value={role} onChange={setRole} className="w-48"
+              options={roleOptions}
             />
             <SelectField value={status} onChange={setStatus} className="w-32"
               options={[{ value: 'all', label: 'All' }, { value: 'active', label: 'Active' }, { value: 'inactive', label: 'Inactive' }]}
@@ -1352,10 +1364,6 @@ function RegisterLinkModal({ onClose }) {
   );
 }
 
-/* ─────────────────────────────────────────────
-   Employee Analytics Modal
-   Shows attendance bar chart + summary stats
-───────────────────────────────────────────── */
 /* ─────────────────────────────────────────────
    Remove Confirmation Modal
    Gives users the choice to permanently delete
