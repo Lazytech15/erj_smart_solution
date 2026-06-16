@@ -264,9 +264,14 @@ export async function createEmployeeAccount({ employeeId, subscriptionId, name, 
 
 export async function updateEmployeeAccount(employeeId, { username, password, name, email }) {
   const updates = {};
-  if (name)     updates.name  = name;
-  if (email)    updates.email = email;
+  if (name)     updates.name     = name;
+  if (email)    updates.email    = email;
   if (password) updates.password = password;
+
+  // `id` is the username column — update it if provided
+  if (username) updates.id = username;
+
+  if (Object.keys(updates).length === 0) return;
 
   const { error } = await supabase
     .from('accounts')

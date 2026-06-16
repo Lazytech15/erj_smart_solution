@@ -115,8 +115,8 @@ export default function EmployeesPage() {
     setRemoveConfirmTarget(null);
   }
 
-  function handleEdit(form) {
-    updateEmployee(editTarget.id, form);
+  async function handleEdit(form) {
+    await updateEmployee(editTarget.id, { ...form, firstName: form.firstName ?? editTarget.firstName, lastName: form.lastName ?? editTarget.lastName });
     toast('Employee updated', 'success');
     setEditModal(false);
     setEditTarget(null);

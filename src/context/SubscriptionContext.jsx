@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
-import { getSubscription, putSubscription, getPendingRegistrations, insertPendingRegistration, updatePendingRegistration, deletePendingRegistration, createEmployeeAccount } from '../utils/db';
+import { getSubscription, putSubscription, getPendingRegistrations, insertPendingRegistration, updatePendingRegistration, deletePendingRegistration, createEmployeeAccount, updateEmployeeAccount, getEmployeeAccount } from '../utils/db';
 import { useAuth } from './AuthContext';
 
 export const PLANS = [
@@ -144,23 +144,28 @@ export function SubscriptionProvider({ children }) {
 
   // ── Employees ────────────────────────────────────────────────────────────────
   const enrollEmployee = useCallback(async (employee) => {
+    // Generate the ID once here so both the enrolledEmployees entry and
+    // the accounts row use the exact same value — calling Date.now() twice
+    // (once inside update() and once after) gives different milliseconds.
+    const empId = Date.now();
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    const rand  = Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+
     update(prev => {
       const plan = PLANS.find(p => p.id === prev.planId);
       if (prev.enrolledEmployees.length >= plan.maxSeats) {
         throw new Error(`Your ${plan.name} plan supports up to ${plan.maxSeats} employees. Please upgrade.`);
       }
-      const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-      const rand  = Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
       return {
         ...prev,
         enrolledEmployees: [
           ...prev.enrolledEmployees,
           {
             ...employee,
-            id: Date.now(),
+            id: empId,
             employeeCode: employee.employeeCode?.trim()
               ? employee.employeeCode.trim().toUpperCase()
-              : `ERJ-${rand}${String(Date.now()).slice(-3)}`,
+              : `ERJ-${rand}${String(empId).slice(-3)}`,
             status: 'active',
             avatarColor: AVATAR_COLORS[prev.enrolledEmployees.length % AVATAR_COLORS.length],
           },
@@ -170,7 +175,6 @@ export function SubscriptionProvider({ children }) {
     // Create mobile login account if credentials provided
     if (employee.username && employee.password) {
       const name = [employee.firstName, employee.lastName].filter(Boolean).join(' ');
-      const empId = Date.now(); // matches the id assigned above
       try {
         await createEmployeeAccount({
           employeeId:     String(empId),
@@ -187,7 +191,46 @@ export function SubscriptionProvider({ children }) {
   }, [update]);
 
   const removeEmployee     = useCallback((id)      => update(prev => ({ ...prev, enrolledEmployees: prev.enrolledEmployees.filter(e => e.id !== id) })), [update]);
-  const updateEmployee     = useCallback((id, upd) => update(prev => ({ ...prev, enrolledEmployees: prev.enrolledEmployees.map(e => e.id === id ? { ...e, ...upd } : e) })), [update]);
+  const updateEmployee = useCallback(async (id, upd) => {
+    // 1. Update the enrolledEmployees JSON in the subscription (local + Supabase)
+    update(prev => ({
+      ...prev,
+      enrolledEmployees: prev.enrolledEmployees.map(e => e.id === id ? { ...e, ...upd } : e),
+    }));
+
+    // 2. Sync the accounts table if any account-related fields changed
+    const accountFields = ['username', 'password', 'name', 'email'];
+    const hasAccountUpdate = accountFields.some(f => upd[f] !== undefined);
+    if (!hasAccountUpdate) return;
+
+    try {
+      const existing = await getEmployeeAccount(String(id));
+
+      if (existing) {
+        // Account exists — update it
+        await updateEmployeeAccount(String(id), {
+          name:     upd.name     ?? undefined,
+          email:    upd.email    ?? undefined,
+          password: upd.password ?? undefined,
+          username: upd.username ?? undefined,
+        });
+      } else if (upd.username && upd.password) {
+        // No account yet — create one now
+        const current = subRef.current;
+        const name = [upd.firstName, upd.lastName].filter(Boolean).join(' ');
+        await createEmployeeAccount({
+          employeeId:     String(id),
+          subscriptionId: current?.subscriptionId,
+          name:           name || upd.name || '',
+          email:          upd.email ?? '',
+          username:       upd.username,
+          password:       upd.password,
+        });
+      }
+    } catch (err) {
+      console.warn('[updateEmployee] account sync failed:', err.message);
+    }
+  }, [update]);
   const cancelSubscription = useCallback(()        => update(prev => ({ ...prev, status: 'cancelled' })), [update]);
   const upgradePlan        = useCallback((planId)  => update(prev => ({ ...prev, planId, status: 'active' })), [update]);
   const clearSubscription  = useCallback(()        => setSubscription(null), []);  // eslint-disable-line
@@ -255,6 +298,8 @@ export function SubscriptionProvider({ children }) {
     if (current.enrolledEmployees.length >= plan.maxSeats) {
       throw new Error(`Seat limit reached for ${plan.name}. Upgrade to approve more employees.`);
     }
+    // Generate ID once so enrolledEmployees and accounts row are always in sync
+    const empId = Date.now();
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     const rand  = Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
     const { id: _pid, subscriptionId: _sid, submittedAt: _s, notes: _n, ...rest } = pending;
@@ -264,10 +309,10 @@ export function SubscriptionProvider({ children }) {
         ...prev.enrolledEmployees,
         {
           ...rest,
-          id: Date.now(),
+          id: empId,
           employeeCode: rest.employeeCode?.trim()
             ? rest.employeeCode.trim().toUpperCase()
-            : `ERJ-${rand}${String(Date.now()).slice(-3)}`,
+            : `ERJ-${rand}${String(empId).slice(-3)}`,
           status: 'active',
           avatarColor: AVATAR_COLORS[prev.enrolledEmployees.length % AVATAR_COLORS.length],
         },
@@ -280,7 +325,7 @@ export function SubscriptionProvider({ children }) {
       const name = [pending.firstName, pending.lastName].filter(Boolean).join(' ');
       try {
         await createEmployeeAccount({
-          employeeId:     String(Date.now()),
+          employeeId:     String(empId),
           subscriptionId: current.subscriptionId,
           name,
           email:    pending.email,
