@@ -156,7 +156,7 @@ export default function LeavePage() {
                 <tr key={req.id}>
                   <td>
                     <div className="flex items-center gap-2.5">
-                      <Avatar name={`${req.employee.firstName} ${req.employee.lastName}`} color={req.employee.avatarColor} size="sm" />
+                      <Avatar name={`${req.employee.firstName} ${req.employee.lastName}`} color={req.employee.avatarColor} size="sm" src={req.employee.profilePhotoUrl} />
                       <div>
                         <p className="font-semibold text-xs text-ink-800">{req.employee.firstName} {req.employee.lastName}</p>
                         <p className="text-[11px] text-ink-400">{req.employee.department}</p>

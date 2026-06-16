@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
-import { getSubscription, putSubscription } from '../utils/db';
+import { getSubscription, putSubscription, getPendingRegistrations, insertPendingRegistration, updatePendingRegistration, deletePendingRegistration, createEmployeeAccount } from '../utils/db';
 import { useAuth } from './AuthContext';
 
 export const PLANS = [
@@ -68,17 +68,23 @@ export function SubscriptionProvider({ children }) {
   // useStateRef keeps state and ref always in sync — no separate sync effect needed
   const [subscription, setSubscription, subRef] = useStateRef(null);
   const [loading, setLoading] = useState(true);
+  const [pendingEmployees, setPendingEmployees] = useState([]);
 
-  // ── Reload from IndexedDB whenever the logged-in user changes ──────────────
+  // ── Reload from Supabase whenever the logged-in user changes ──────────────
   useEffect(() => {
     let cancelled = false;
     async function load() {
       setLoading(true);
       setSubscription(null);      // clears both state and ref
+      setPendingEmployees([]);
       if (user?.subscriptionId) {
-        const data = await getSubscription(user.subscriptionId);
+        const [data, pending] = await Promise.all([
+          getSubscription(user.subscriptionId),
+          getPendingRegistrations(user.subscriptionId),
+        ]);
         if (!cancelled) {
-          setSubscription(data ?? null);   // sets both state and ref
+          setSubscription(data ?? null);
+          setPendingEmployees(pending);
         }
       }
       if (!cancelled) setLoading(false);
@@ -137,7 +143,7 @@ export function SubscriptionProvider({ children }) {
   }, []); // eslint-disable-line
 
   // ── Employees ────────────────────────────────────────────────────────────────
-  const enrollEmployee = useCallback((employee) => {
+  const enrollEmployee = useCallback(async (employee) => {
     update(prev => {
       const plan = PLANS.find(p => p.id === prev.planId);
       if (prev.enrolledEmployees.length >= plan.maxSeats) {
@@ -161,6 +167,23 @@ export function SubscriptionProvider({ children }) {
         ],
       };
     });
+    // Create mobile login account if credentials provided
+    if (employee.username && employee.password) {
+      const name = [employee.firstName, employee.lastName].filter(Boolean).join(' ');
+      const empId = Date.now(); // matches the id assigned above
+      try {
+        await createEmployeeAccount({
+          employeeId:     String(empId),
+          subscriptionId: subRef.current?.subscriptionId,
+          name,
+          email:    employee.email,
+          username: employee.username,
+          password: employee.password,
+        });
+      } catch (err) {
+        console.warn('[enrollEmployee] account creation failed:', err.message);
+      }
+    }
   }, [update]);
 
   const removeEmployee     = useCallback((id)      => update(prev => ({ ...prev, enrolledEmployees: prev.enrolledEmployees.filter(e => e.id !== id) })), [update]);
@@ -211,6 +234,70 @@ export function SubscriptionProvider({ children }) {
     }));
   }, [update]);
 
+  // ── Employee Self-Registration (Supabase-backed) ──────────────────────────
+  const submitRegistration = useCallback(async (subscriptionId, form) => {
+    const id = await insertPendingRegistration(subscriptionId, form);
+    const newEntry = { ...form, id, subscriptionId, submittedAt: new Date().toISOString() };
+    setPendingEmployees(prev => [...prev, newEntry]);
+  }, []);
+
+  const editPendingRegistration = useCallback(async (pendingId, form) => {
+    await updatePendingRegistration(pendingId, form);
+    setPendingEmployees(prev => prev.map(p => p.id === pendingId ? { ...p, ...form } : p));
+  }, []);
+
+  const approveEmployee = useCallback(async (pendingId, pendingList) => {
+    const current = subRef.current;
+    if (!current) return;
+    const pending = (pendingList || []).find(p => p.id === pendingId);
+    if (!pending) throw new Error('Pending registration not found.');
+    const plan = PLANS.find(p => p.id === current.planId);
+    if (current.enrolledEmployees.length >= plan.maxSeats) {
+      throw new Error(`Seat limit reached for ${plan.name}. Upgrade to approve more employees.`);
+    }
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    const rand  = Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+    const { id: _pid, subscriptionId: _sid, submittedAt: _s, notes: _n, ...rest } = pending;
+    update(prev => ({
+      ...prev,
+      enrolledEmployees: [
+        ...prev.enrolledEmployees,
+        {
+          ...rest,
+          id: Date.now(),
+          employeeCode: rest.employeeCode?.trim()
+            ? rest.employeeCode.trim().toUpperCase()
+            : `ERJ-${rand}${String(Date.now()).slice(-3)}`,
+          status: 'active',
+          avatarColor: AVATAR_COLORS[prev.enrolledEmployees.length % AVATAR_COLORS.length],
+        },
+      ],
+    }));
+    await deletePendingRegistration(pendingId);
+    setPendingEmployees(prev => prev.filter(p => p.id !== pendingId));
+    // Create mobile login account if credentials provided
+    if (pending.username && pending.password) {
+      const name = [pending.firstName, pending.lastName].filter(Boolean).join(' ');
+      try {
+        await createEmployeeAccount({
+          employeeId:     String(Date.now()),
+          subscriptionId: current.subscriptionId,
+          name,
+          email:    pending.email,
+          username: pending.username,
+          password: pending.password,
+        });
+      } catch (err) {
+        console.warn('[approveEmployee] account creation failed:', err.message);
+      }
+    }
+  }, [update]); // eslint-disable-line
+
+  const rejectEmployee = useCallback(async (pendingId) => {
+    await deletePendingRegistration(pendingId);
+    setPendingEmployees(prev => prev.filter(p => p.id !== pendingId));
+  }, []);
+
   // ── Departments ───────────────────────────────────────────────────────────────
   const addDepartment    = useCallback((name) => update(prev => ({ ...prev, departments: [...prev.departments, name] })), [update]);
   const removeDepartment = useCallback((name) => update(prev => ({ ...prev, departments: prev.departments.filter(d => d !== name) })), [update]);
@@ -231,7 +318,10 @@ export function SubscriptionProvider({ children }) {
   return (
     <SubscriptionContext.Provider value={{
       subscription, loading, currentPlan, seatsUsed, seatsAvailable, trialDaysLeft,
+      pendingEmployees,
+      setPendingEmployeesExternal: setPendingEmployees,
       subscribe, enrollEmployee, removeEmployee, updateEmployee,
+      submitRegistration, editPendingRegistration, approveEmployee, rejectEmployee,
       cancelSubscription, upgradePlan, clearSubscription, updateSettings,
       addAttendanceRecord, updateAttendanceRecord,
       addLeaveRequest, updateLeaveRequest,

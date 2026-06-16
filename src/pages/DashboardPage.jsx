@@ -139,7 +139,7 @@ export default function DashboardPage() {
             <div className="space-y-2">
               {employees.slice(-5).reverse().map(emp => (
                 <div key={emp.id} className="flex items-center gap-3 py-1.5">
-                  <Avatar name={`${emp.firstName} ${emp.lastName}`} color={emp.avatarColor} size="sm" />
+                  <Avatar name={`${emp.firstName} ${emp.lastName}`} color={emp.avatarColor} size="sm" src={emp.profilePhotoUrl} />
                   <div className="flex-1 min-w-0">
                     <p className="text-xs font-semibold text-ink-800 truncate">{emp.firstName} {emp.lastName}</p>
                     <p className="text-[11px] text-ink-400 truncate">{emp.role} · {emp.department}</p>

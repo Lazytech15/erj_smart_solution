@@ -3,6 +3,7 @@ import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-route
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { SubscriptionProvider, useSubscription } from './context/SubscriptionContext';
 import { ToastProvider } from './context/ToastContext';
+import { NotificationsProvider } from './context/NotificationsContext';
 import AppLayout from './components/layout/AppLayout';
 import LoadingScreen from './components/LoadingScreen';
 
@@ -10,6 +11,7 @@ import LandingPage from './pages/public/LandingPage';
 import PricingPage from './pages/public/PricingPage';
 import SignupPage from './pages/public/SignupPage';
 import OnboardingPage from './pages/public/OnboardingPage';
+import EmployeeRegisterPage from './pages/public/EmployeeRegisterPage';
 import LoginPage from './pages/LoginPage';
 
 import DashboardPage from './pages/DashboardPage';
@@ -109,6 +111,7 @@ function AppRoutes() {
       <Route path="/pricing" element={<PublicRoute><PricingPage /></PublicRoute>} />
       <Route path="/signup"  element={<PublicRoute><SignupPage /></PublicRoute>} />
       <Route path="/login"   element={<PublicRoute><LoginPage /></PublicRoute>} />
+      <Route path="/register" element={<EmployeeRegisterPage />} />
 
       <Route path="/onboard" element={<OnboardingPage />} />
 
@@ -136,11 +139,13 @@ export default function App() {
     <BrowserRouter>
       <AuthProvider>
         <SubscriptionProvider>
+          <NotificationsProvider>
           <ToastProvider>
             <FirstLoadGate>
               <AppRoutes />
             </FirstLoadGate>
           </ToastProvider>
+          </NotificationsProvider>
         </SubscriptionProvider>
       </AuthProvider>
     </BrowserRouter>

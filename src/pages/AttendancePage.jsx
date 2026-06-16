@@ -173,7 +173,7 @@ export default function AttendancePage() {
                 <tr key={rec.id}>
                   <td>
                     <div className="flex items-center gap-2.5">
-                      <Avatar name={`${rec.employee.firstName} ${rec.employee.lastName}`} color={rec.employee.avatarColor} size="sm" />
+                      <Avatar name={`${rec.employee.firstName} ${rec.employee.lastName}`} color={rec.employee.avatarColor} size="sm" src={rec.employee.profilePhotoUrl} />
                       <div>
                         <p className="font-semibold text-xs text-ink-800">{rec.employee.firstName} {rec.employee.lastName}</p>
                         <p className="text-[11px] text-ink-400">{rec.employee.employeeCode}</p>

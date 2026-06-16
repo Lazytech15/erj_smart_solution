@@ -1,20 +1,38 @@
-import { useState, useMemo } from 'react';
-import { UserPlus, Pencil, Trash2, Eye, ToggleLeft, ToggleRight, RefreshCw, Wand2, PenLine, BarChart2, Clock, CheckCircle, XCircle, AlertTriangle, TrendingUp } from 'lucide-react';
+import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
+import { UserPlus, Pencil, Trash2, Eye, EyeOff, ToggleLeft, ToggleRight, RefreshCw, Wand2, PenLine, BarChart2, Clock, CheckCircle, XCircle, AlertTriangle, TrendingUp, ClipboardCopy, UserCheck, Link, Camera, Upload, X as XIcon } from 'lucide-react';
+import { useLocation } from 'react-router-dom';
 import { useSubscription } from '../context/SubscriptionContext';
 import { fmt } from '../utils/dateTime';
 import { Avatar, StatusBadge, SearchInput, SelectField, SectionHeader, EmptyState, Modal, InputField } from '../components/ui';
 import { useToast } from '../context/ToastContext';
 import { useAuth } from '../context/AuthContext';
+import { supabase } from '../utils/supabase';
 
 export default function EmployeesPage() {
   const toast = useToast();
   const { can } = useAuth();
-  const { subscription, enrollEmployee, removeEmployee, updateEmployee, seatsAvailable, currentPlan } = useSubscription();
+  const location = useLocation();
+  const pendingSectionRef = useRef(null);
+  const [pendingHighlight, setPendingHighlight] = useState(false);
+  const { subscription, enrollEmployee, removeEmployee, updateEmployee, pendingEmployees, approveEmployee, rejectEmployee, editPendingRegistration, seatsAvailable, currentPlan } = useSubscription();
+
+  // When navigated from the notification bell, scroll to + flash-highlight pending section
+  useEffect(() => {
+    if (location.state?.scrollToPending) {
+      const t = setTimeout(() => {
+        pendingSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        setPendingHighlight(true);
+        setTimeout(() => setPendingHighlight(false), 2000);
+      }, 80);
+      return () => clearTimeout(t);
+    }
+  }, [location.state?.ts]);
 
   const EMPLOYEES = subscription?.enrolledEmployees || [];
   const DEPARTMENTS = subscription?.departments || [];
   const SHIFTS = subscription?.shifts || [];
   const ATTENDANCE = subscription?.attendanceRecords || [];
+  const PENDING = pendingEmployees || [];
 
   const [search, setSearch] = useState('');
   const [dept, setDept] = useState('all');
@@ -26,6 +44,9 @@ export default function EmployeesPage() {
   const [editModal, setEditModal] = useState(false);
   const [analyticsTarget, setAnalyticsTarget] = useState(null);
   const [removeConfirmTarget, setRemoveConfirmTarget] = useState(null);
+  const [pendingTarget, setPendingTarget] = useState(null);   // employee pending approval
+  const [pendingAction, setPendingAction] = useState(null);   // 'approve' | 'reject' | 'edit'
+  const [showRegisterLink, setShowRegisterLink] = useState(false);
 
   const employees = useMemo(() => {
     let list = EMPLOYEES.map(e => ({
@@ -82,6 +103,32 @@ export default function EmployeesPage() {
     toast(`Employee marked as ${newStatus}`, 'success');
   }
 
+  async function handleApprove(pending) {
+    try {
+      await approveEmployee(pending.id, PENDING);
+      const name = [pending.firstName, pending.middleName, pending.lastName, pending.suffix].filter(Boolean).join(' ');
+      toast(`${name} approved and enrolled`, 'success');
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+    setPendingTarget(null);
+    setPendingAction(null);
+  }
+
+  async function handleReject(pending) {
+    await rejectEmployee(pending.id);
+    const name = [pending.firstName, pending.middleName, pending.lastName, pending.suffix].filter(Boolean).join(' ');
+    toast(`${name}'s request rejected`, 'warning');
+    setPendingTarget(null);
+    setPendingAction(null);
+  }
+
+  async function handleEditPending(pendingId, form) {
+    await editPendingRegistration(pendingId, form);
+    toast('Registration updated', 'success');
+    setPendingAction('approve'); // after edit, go straight to approve confirmation
+  }
+
   return (
     <div className="space-y-4">
       <SectionHeader
@@ -89,12 +136,85 @@ export default function EmployeesPage() {
         description={`${EMPLOYEES.length} enrolled employee${EMPLOYEES.length !== 1 ? 's' : ''}`}
         actions={
           can('edit_all') && (
-            <button className="btn-primary btn-sm" onClick={() => setAddModal(true)}>
-              <UserPlus size={13} /> Add Employee
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                className="btn-secondary btn-sm"
+                onClick={() => setShowRegisterLink(true)}
+                title="Share registration link"
+              >
+                <Link size={13} /> Registration Link
+              </button>
+              <button className="btn-primary btn-sm" onClick={() => setAddModal(true)}>
+                <UserPlus size={13} /> Add Employee
+              </button>
+            </div>
           )
         }
       />
+
+      {/* ── Pending Requests Banner ── */}
+      {can('edit_all') && PENDING.length > 0 && (
+        <div
+          ref={pendingSectionRef}
+          className={`card border-l-4 p-4 transition-all duration-500 ${pendingHighlight ? 'ring-2 ring-amber-400 ring-offset-2 shadow-amber-100 shadow-lg' : ''}`}
+          style={{ borderLeftColor: '#f59e0b' }}
+        >
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ background: '#fffbeb' }}>
+                <UserCheck size={14} style={{ color: '#d97706' }} />
+              </div>
+              <div>
+                <p className="text-sm font-semibold text-ink-800">
+                  {PENDING.length} Pending Registration{PENDING.length !== 1 ? 's' : ''}
+                </p>
+                <p className="text-xs text-ink-400">Review and approve or reject each request below.</p>
+              </div>
+            </div>
+          </div>
+          <div className="space-y-2">
+            {PENDING.map(p => {
+              const name = [p.firstName, p.middleName, p.lastName, p.suffix].filter(Boolean).join(' ');
+              return (
+                <div key={p.id} className="flex items-center gap-3 p-3 rounded-xl bg-surface-50 border border-surface-200">
+                  <Avatar name={name} size="sm" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-semibold text-ink-800 truncate">{name}</p>
+                    <p className="text-[11px] text-ink-400 truncate">{p.role}{p.department ? ` · ${p.department}` : ''}</p>
+                    <p className="text-[10px] text-ink-300">{p.email}</p>
+                  </div>
+                  <div className="text-[10px] text-ink-300 shrink-0">
+                    {new Date(p.submittedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      onClick={() => { setPendingTarget(p); setPendingAction('edit'); }}
+                      className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all"
+                      style={{ background: '#eef2ff', color: '#6366f1', border: '1px solid #c7d2fe' }}
+                    >
+                      <Pencil size={12} /> Edit
+                    </button>
+                    <button
+                      onClick={() => { setPendingTarget(p); setPendingAction('approve'); }}
+                      className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all"
+                      style={{ background: '#f0fdf4', color: '#16a34a', border: '1px solid #bbf7d0' }}
+                    >
+                      <CheckCircle size={12} /> Approve
+                    </button>
+                    <button
+                      onClick={() => { setPendingTarget(p); setPendingAction('reject'); }}
+                      className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all"
+                      style={{ background: '#fef2f2', color: '#dc2626', border: '1px solid #fecaca' }}
+                    >
+                      <XCircle size={12} /> Reject
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {EMPLOYEES.length === 0 ? (
         <div className="card p-12 flex flex-col items-center text-center">
@@ -150,7 +270,7 @@ export default function EmployeesPage() {
                     <tr key={emp.id} className="cursor-pointer hover:bg-surface-50 transition-colors" onClick={() => setAnalyticsTarget(emp)}>
                       <td className="text-center">
                         <div className="flex items-center justify-center gap-2.5">
-                          <Avatar name={`${emp.firstName} ${emp.lastName}`} color={emp.avatarColor} size="sm" />
+                          <Avatar name={`${emp.firstName} ${emp.lastName}`} color={emp.avatarColor} size="sm" src={emp.profilePhotoUrl} />
                           <div className="text-left">
                             <p className="font-semibold text-xs text-ink-800">{[emp.firstName, emp.middleName, emp.lastName, emp.suffix].filter(Boolean).join(' ')}</p>
                             <p className="text-[11px] text-ink-400">{emp.email}</p>
@@ -193,7 +313,7 @@ export default function EmployeesPage() {
               {employees.map(emp => (
                 <div key={emp.id} className="card-hover p-4 cursor-pointer" onClick={() => setAnalyticsTarget(emp)}>
                   <div className="flex flex-col items-center text-center gap-2">
-                    <Avatar name={`${emp.firstName} ${emp.lastName}`} color={emp.avatarColor} size="lg" />
+                    <Avatar name={`${emp.firstName} ${emp.lastName}`} color={emp.avatarColor} size="lg" src={emp.profilePhotoUrl} />
                     <div>
                       <p className="text-xs font-semibold text-ink-800">{[emp.firstName, emp.middleName, emp.lastName, emp.suffix].filter(Boolean).join(' ')}</p>
                       <p className="text-[11px] text-ink-400">{emp.role}</p>
@@ -222,7 +342,7 @@ export default function EmployeesPage() {
         {selected && (
           <div className="space-y-4">
             <div className="flex items-center gap-4">
-              <Avatar name={`${selected.firstName} ${selected.lastName}`} color={selected.avatarColor} size="xl" />
+              <Avatar name={`${selected.firstName} ${selected.lastName}`} color={selected.avatarColor} size="xl" src={selected.profilePhotoUrl} />
               <div>
                 <h3 className="text-base font-bold text-ink-900">{[selected.firstName, selected.middleName, selected.lastName, selected.suffix].filter(Boolean).join(' ')}</h3>
                 <p className="text-sm text-ink-500">{selected.role}</p>
@@ -299,6 +419,35 @@ export default function EmployeesPage() {
           onDeactivate={() => confirmDeactivate(removeConfirmTarget)}
         />
       )}
+
+      {/* Pending Edit Modal */}
+      {pendingTarget && pendingAction === 'edit' && (
+        <EditPendingModal
+          pending={pendingTarget}
+          departments={DEPARTMENTS}
+          shifts={SHIFTS}
+          onClose={() => { setPendingTarget(null); setPendingAction(null); }}
+          onSave={(form) => handleEditPending(pendingTarget.id, form)}
+          onApprove={() => setPendingAction('approve')}
+        />
+      )}
+
+      {/* Pending Approval / Rejection Modal */}
+      {pendingTarget && (pendingAction === 'approve' || pendingAction === 'reject') && (
+        <PendingConfirmModal
+          pending={pendingTarget}
+          action={pendingAction}
+          onClose={() => { setPendingTarget(null); setPendingAction(null); }}
+          onEdit={() => setPendingAction('edit')}
+          onConfirm={() => pendingAction === 'approve' ? handleApprove(pendingTarget) : handleReject(pendingTarget)}
+          seatsAvailable={seatsAvailable}
+        />
+      )}
+
+      {/* Registration Link Modal */}
+      {showRegisterLink && (
+        <RegisterLinkModal onClose={() => setShowRegisterLink(false)} />
+      )}
     </div>
   );
 }
@@ -361,8 +510,10 @@ function AddEmployeeModal({ open, onClose, onSave, departments, shifts, seatsAva
     joinDate: new Date().toISOString().split('T')[0],
     employeeCode: '',
     shiftId: '',
+    username: '', password: '',
   });
   const [idMode, setIdMode] = useState('manual');
+  const [showPw, setShowPw] = useState(false);
   const [errors, setErrors] = useState({});
   const f = (k) => (v) => setForm(prev => ({ ...prev, [k]: v }));
 
@@ -382,15 +533,20 @@ function AddEmployeeModal({ open, onClose, onSave, departments, shifts, seatsAva
     if (!form.role.trim()) e.role = 'Required';
     const code = form.employeeCode.trim().toUpperCase();
     if (!code) e.employeeCode = 'Employee ID is required';
+    if (form.username.trim() && form.username.trim().length < 4) e.username = 'Min 4 characters';
+    if (form.username.trim() && !/^[a-z0-9._-]+$/i.test(form.username.trim())) e.username = 'Letters, numbers, . _ - only';
+    if (form.username.trim() && !form.password.trim()) e.password = 'Password required when username is set';
+    if (form.password.trim() && form.password.trim().length < 6) e.password = 'Min 6 characters';
     setErrors(e);
     return Object.keys(e).length === 0;
   }
 
   function handleSave() {
     if (!validate()) return;
-    onSave({ ...form, employeeCode: form.employeeCode.trim().toUpperCase() });
-    setForm({ firstName: '', middleName: '', lastName: '', suffix: '', email: '', phone: '', role: '', department: departments[0] || '', joinDate: new Date().toISOString().split('T')[0], employeeCode: '', shiftId: '' });
+    onSave({ ...form, employeeCode: form.employeeCode.trim().toUpperCase(), username: form.username.trim(), password: form.password });
+    setForm({ firstName: '', middleName: '', lastName: '', suffix: '', email: '', phone: '', role: '', department: departments[0] || '', joinDate: new Date().toISOString().split('T')[0], employeeCode: '', shiftId: '', username: '', password: '' });
     setIdMode('manual');
+    setShowPw(false);
     setErrors({});
   }
 
@@ -496,13 +652,98 @@ function AddEmployeeModal({ open, onClose, onSave, departments, shifts, seatsAva
           )}
           {errors.employeeCode && <p className="text-xs text-danger-600 mt-1">{errors.employeeCode}</p>}
         </div>
+
+        {/* ── Mobile App Credentials ── */}
+        <div className="pt-3 border-t border-surface-200">
+          <div className="flex items-center gap-2 mb-3">
+            <div className="w-5 h-5 rounded-md bg-indigo-50 flex items-center justify-center">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#6366f1" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+            </div>
+            <p className="text-xs font-semibold text-slate-700">Mobile App Credentials</p>
+            <span className="text-[10px] text-slate-400 font-normal">(optional)</span>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="label">Username</label>
+              <input
+                type="text"
+                value={form.username}
+                onChange={e => f('username')(e.target.value.toLowerCase().replace(/\s/g, ''))}
+                placeholder="e.g. m.santos"
+                className={`input w-full font-mono ${errors.username ? 'border-danger-500' : ''}`}
+                autoComplete="off"
+              />
+              {errors.username
+                ? <p className="text-xs text-danger-600 mt-1">{errors.username}</p>
+                : <p className="text-[10px] text-ink-400 mt-1">Used to log in to the mobile app</p>
+              }
+            </div>
+            <div>
+              <label className="label">Password</label>
+              <div className="relative">
+                <input
+                  type={showPw ? 'text' : 'password'}
+                  value={form.password}
+                  onChange={e => f('password')(e.target.value)}
+                  placeholder="Min 6 characters"
+                  className={`input w-full pr-9 ${errors.password ? 'border-danger-500' : ''}`}
+                  autoComplete="new-password"
+                />
+                <button type="button" onClick={() => setShowPw(v => !v)}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 transition-colors">
+                  {showPw ? <EyeOff size={13} /> : <Eye size={13} />}
+                </button>
+              </div>
+              {errors.password
+                ? <p className="text-xs text-danger-600 mt-1">{errors.password}</p>
+                : form.password && (
+                  <div className="flex gap-1 mt-1.5">
+                    {[1,2,3,4].map(i => (
+                      <div key={i} className={`h-1 flex-1 rounded-full transition-all ${
+                        form.password.length >= i * 3
+                          ? i <= 1 ? 'bg-red-400' : i <= 2 ? 'bg-amber-400' : i <= 3 ? 'bg-blue-400' : 'bg-emerald-400'
+                          : 'bg-slate-200'
+                      }`} />
+                    ))}
+                  </div>
+                )
+              }
+            </div>
+          </div>
+        </div>
       </div>
     </Modal>
   );
 }
 
+/* ── convertToWebP: browser-side conversion using canvas ── */
+async function convertToWebP(file, maxSizePx = 512) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const scale = Math.min(1, maxSizePx / Math.max(img.width, img.height));
+      const w = Math.round(img.width * scale);
+      const h = Math.round(img.height * scale);
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, w, h);
+      canvas.toBlob(blob => {
+        if (!blob) { reject(new Error('WebP conversion failed')); return; }
+        resolve(new File([blob], file.name.replace(/\.[^.]+$/, '.webp'), { type: 'image/webp' }));
+      }, 'image/webp', 0.82);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Image load failed')); };
+    img.src = url;
+  });
+}
+
 function EditEmployeeModal({ open, onClose, onSave, departments, shifts, employee }) {
   const uid = `edit-${employee.id}`;
+  const fileInputRef = useRef(null);
   const [form, setForm] = useState({
     firstName: employee.firstName,
     middleName: employee.middleName || '',
@@ -514,9 +755,38 @@ function EditEmployeeModal({ open, onClose, onSave, departments, shifts, employe
     department: employee.department,
     joinDate: employee.joinDate,
     shiftId: employee.shiftId || '',
+    username: employee.username || '',
+    password: '',
   });
   const [errors, setErrors] = useState({});
+  const [showPw, setShowPw] = useState(false);
+  // Photo upload state
+  const [photoPreview, setPhotoPreview] = useState(employee.profilePhotoUrl || null);
+  const [photoFile, setPhotoFile] = useState(null);
+  const [photoUploading, setPhotoUploading] = useState(false);
+  const [photoError, setPhotoError] = useState('');
   const f = (k) => (v) => setForm(prev => ({ ...prev, [k]: v }));
+
+  async function handlePhotoChange(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith('image/')) { setPhotoError('Please select an image file.'); return; }
+    if (file.size > 8 * 1024 * 1024) { setPhotoError('Image must be under 8 MB.'); return; }
+    setPhotoError('');
+    try {
+      const webpFile = await convertToWebP(file, 512);
+      setPhotoFile(webpFile);
+      setPhotoPreview(URL.createObjectURL(webpFile));
+    } catch (err) {
+      setPhotoError('Could not process image. Try another file.');
+    }
+  }
+
+  function handleRemovePhoto() {
+    setPhotoFile(null);
+    setPhotoPreview(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  }
 
   function validate() {
     const e = {};
@@ -524,25 +794,104 @@ function EditEmployeeModal({ open, onClose, onSave, departments, shifts, employe
     if (!form.lastName.trim()) e.lastName = 'Required';
     if (!form.email.includes('@')) e.email = 'Valid email required';
     if (!form.role.trim()) e.role = 'Required';
+    if (form.username.trim() && form.username.trim().length < 4) e.username = 'Min 4 characters';
+    if (form.username.trim() && !/^[a-z0-9._-]+$/i.test(form.username.trim())) e.username = 'Letters, numbers, . _ - only';
+    if (form.password.trim() && form.password.trim().length < 6) e.password = 'Min 6 characters';
+    if (form.username.trim() && !employee.username && !form.password.trim()) e.password = 'Password required when setting a new username';
     setErrors(e);
     return Object.keys(e).length === 0;
   }
 
-  function handleSave() {
+  async function handleSave() {
     if (!validate()) return;
-    onSave(form);
+    let profilePhotoUrl = employee.profilePhotoUrl || null;
+
+    // Upload new photo to Supabase Storage if one was selected
+    if (photoFile) {
+      setPhotoUploading(true);
+      try {
+        const ext = 'webp';
+        const path = `employee-photos/${employee.id}_${Date.now()}.${ext}`;
+        const { error: uploadError } = await supabase.storage
+          .from('employee-photos')
+          .upload(path, photoFile, { upsert: true, contentType: 'image/webp' });
+        if (uploadError) throw uploadError;
+        const { data } = supabase.storage.from('employee-photos').getPublicUrl(path);
+        profilePhotoUrl = data.publicUrl;
+      } catch (err) {
+        setPhotoError(`Upload failed: ${err.message}`);
+        setPhotoUploading(false);
+        return;
+      }
+      setPhotoUploading(false);
+    } else if (photoPreview === null && employee.profilePhotoUrl) {
+      // Photo was removed
+      profilePhotoUrl = null;
+    }
+
+    onSave({ ...form, profilePhotoUrl });
   }
 
   return (
     <Modal open={open} onClose={onClose} title="Edit Employee" width="max-w-xl"
       footer={
         <>
-          <button className="btn-secondary" onClick={onClose}>Cancel</button>
-          <button className="btn-primary" onClick={handleSave}>Save Changes</button>
+          <button className="btn-secondary" onClick={onClose} disabled={photoUploading}>Cancel</button>
+          <button className="btn-primary" onClick={handleSave} disabled={photoUploading}>
+            {photoUploading ? 'Uploading…' : 'Save Changes'}
+          </button>
         </>
       }
     >
       <div className="space-y-3">
+
+        {/* ── Profile Photo Upload ── */}
+        <div>
+          <label className="label">Profile Photo <span className="text-ink-400 font-normal">(optional)</span></label>
+          <div className="flex items-center gap-4">
+            {/* Preview circle */}
+            <div className="relative shrink-0">
+              {photoPreview ? (
+                <div className="relative w-16 h-16 rounded-full overflow-hidden border-2 border-surface-200 bg-surface-50">
+                  <img src={photoPreview} alt="Preview" className="w-full h-full object-cover" />
+                  <button
+                    type="button"
+                    onClick={handleRemovePhoto}
+                    className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 hover:opacity-100 transition-opacity rounded-full"
+                    title="Remove photo"
+                  >
+                    <XIcon size={14} className="text-white" />
+                  </button>
+                </div>
+              ) : (
+                <div className="w-16 h-16 rounded-full border-2 border-dashed border-surface-300 bg-surface-50 flex items-center justify-center">
+                  <Camera size={18} className="text-ink-300" />
+                </div>
+              )}
+            </div>
+            {/* Upload button */}
+            <div className="flex-1">
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="flex items-center gap-2 px-3 py-2 rounded-xl border border-surface-300 text-xs font-semibold text-ink-600 hover:border-brand-400 hover:text-brand-600 hover:bg-brand-50 transition-all"
+              >
+                <Upload size={13} />
+                {photoPreview ? 'Change Photo' : 'Upload Photo'}
+              </button>
+              <p className="text-[10px] text-ink-400 mt-1">JPG, PNG, or WebP · max 8 MB · stored as WebP</p>
+              {photoError && <p className="text-xs text-danger-600 mt-1">{photoError}</p>}
+            </div>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={handlePhotoChange}
+            />
+          </div>
+        </div>
+
         <div className="grid grid-cols-2 gap-3">
           <InputField label="First Name" value={form.firstName} onChange={f('firstName')} placeholder="Maria" error={errors.firstName} />
           <InputField label="Last Name" value={form.lastName} onChange={f('lastName')} placeholder="Santos" error={errors.lastName} />
@@ -587,11 +936,388 @@ function EditEmployeeModal({ open, onClose, onSave, departments, shifts, employe
             ))}
           </select>
         </div>
+
+        {/* ── Mobile App Credentials ── */}
+        <div className="pt-3 border-t border-surface-200">
+          <div className="flex items-center gap-2 mb-3">
+            <div className="w-5 h-5 rounded-md bg-indigo-50 flex items-center justify-center">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#6366f1" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+            </div>
+            <p className="text-xs font-semibold text-slate-700">Mobile App Credentials</p>
+            <span className="text-[10px] text-slate-400 font-normal">(optional)</span>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="label">Username</label>
+              <input
+                type="text"
+                value={form.username}
+                onChange={e => f('username')(e.target.value.toLowerCase().replace(/\s/g, ''))}
+                placeholder="e.g. m.santos"
+                className={`input w-full font-mono ${errors.username ? 'border-danger-500' : ''}`}
+                autoComplete="off"
+              />
+              {errors.username
+                ? <p className="text-xs text-danger-600 mt-1">{errors.username}</p>
+                : <p className="text-[10px] text-ink-400 mt-1">Used to log in to the mobile app</p>
+              }
+            </div>
+            <div>
+              <label className="label">
+                Password
+                {employee.username && <span className="text-[10px] text-ink-400 font-normal ml-1">(leave blank to keep current)</span>}
+              </label>
+              <div className="relative">
+                <input
+                  type={showPw ? 'text' : 'password'}
+                  value={form.password}
+                  onChange={e => f('password')(e.target.value)}
+                  placeholder={employee.username ? '••••••' : 'Min 6 characters'}
+                  className={`input w-full pr-9 ${errors.password ? 'border-danger-500' : ''}`}
+                  autoComplete="new-password"
+                />
+                <button type="button" onClick={() => setShowPw(v => !v)}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 transition-colors">
+                  {showPw ? <EyeOff size={13} /> : <Eye size={13} />}
+                </button>
+              </div>
+              {errors.password
+                ? <p className="text-xs text-danger-600 mt-1">{errors.password}</p>
+                : form.password && (
+                  <div className="flex gap-1 mt-1.5">
+                    {[1,2,3,4].map(i => (
+                      <div key={i} className={`h-1 flex-1 rounded-full transition-all ${
+                        form.password.length >= i * 3
+                          ? i <= 1 ? 'bg-red-400' : i <= 2 ? 'bg-amber-400' : i <= 3 ? 'bg-blue-400' : 'bg-emerald-400'
+                          : 'bg-slate-200'
+                      }`} />
+                    ))}
+                  </div>
+                )
+              }
+            </div>
+          </div>
+        </div>
       </div>
     </Modal>
   );
 }
 
+
+/* ─────────────────────────────────────────────
+   Edit Pending Registration Modal
+   Lets HR fix details before approving
+───────────────────────────────────────────── */
+function EditPendingModal({ pending, departments, shifts, onClose, onSave, onApprove }) {
+  const [form, setForm] = useState({
+    firstName:    pending.firstName,
+    middleName:   pending.middleName  || '',
+    lastName:     pending.lastName,
+    suffix:       pending.suffix      || '',
+    email:        pending.email,
+    phone:        pending.phone       || '',
+    role:         pending.role,
+    department:   pending.department  || '',
+    joinDate:     pending.joinDate    || new Date().toISOString().split('T')[0],
+    shiftId:      pending.shiftId     || '',
+    employeeCode: pending.employeeCode || '',
+    notes:        pending.notes       || '',
+    username:     pending.username    || '',
+    password:     pending.password    || '',
+  });
+  const [showPw, setShowPw] = useState(false);
+  const [errors, setErrors] = useState({});
+  const f = k => v => setForm(prev => ({ ...prev, [k]: v }));
+
+  function validate() {
+    const e = {};
+    if (!form.firstName.trim()) e.firstName = 'Required';
+    if (!form.lastName.trim())  e.lastName  = 'Required';
+    if (!form.email.includes('@')) e.email  = 'Valid email required';
+    if (!form.role.trim()) e.role = 'Required';
+    if (form.username.trim() && form.username.trim().length < 4) e.username = 'Min 4 characters';
+    if (form.password.trim() && form.password.trim().length < 6) e.password = 'Min 6 characters';
+    if (form.username.trim() && !form.password.trim()) e.password = 'Password required';
+    setErrors(e);
+    return Object.keys(e).length === 0;
+  }
+
+  function handleSave() {
+    if (!validate()) return;
+    onSave(form);
+  }
+
+  return (
+    <Modal open={true} onClose={onClose} title="Edit Registration" width="max-w-xl"
+      footer={
+        <div className="flex gap-2 w-full">
+          <button className="btn-secondary" onClick={onClose}>Cancel</button>
+          <button className="btn-secondary ml-auto" onClick={handleSave}>Save Changes</button>
+          <button className="btn-primary" onClick={() => { if (validate()) { onSave(form); } }}>
+            Save &amp; Approve
+          </button>
+        </div>
+      }
+    >
+      <div className="space-y-3">
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="label">First Name <span className="text-danger-500">*</span></label>
+            <input className={`input w-full ${errors.firstName ? 'border-danger-500' : ''}`}
+              value={form.firstName} onChange={e => f('firstName')(e.target.value)} placeholder="Maria" />
+            {errors.firstName && <p className="text-xs text-danger-600 mt-1">{errors.firstName}</p>}
+          </div>
+          <div>
+            <label className="label">Last Name <span className="text-danger-500">*</span></label>
+            <input className={`input w-full ${errors.lastName ? 'border-danger-500' : ''}`}
+              value={form.lastName} onChange={e => f('lastName')(e.target.value)} placeholder="Santos" />
+            {errors.lastName && <p className="text-xs text-danger-600 mt-1">{errors.lastName}</p>}
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="label">Middle Name <span className="text-ink-400 font-normal">(optional)</span></label>
+            <input className="input w-full" value={form.middleName} onChange={e => f('middleName')(e.target.value)} placeholder="Cristina" />
+          </div>
+          <div>
+            <label className="label">Suffix <span className="text-ink-400 font-normal">(optional)</span></label>
+            <input className="input w-full" value={form.suffix} onChange={e => f('suffix')(e.target.value)} placeholder="Jr., Sr., III…" />
+          </div>
+        </div>
+        <div>
+          <label className="label">Work Email <span className="text-danger-500">*</span></label>
+          <input type="email" className={`input w-full ${errors.email ? 'border-danger-500' : ''}`}
+            value={form.email} onChange={e => f('email')(e.target.value)} placeholder="m.santos@company.com" />
+          {errors.email && <p className="text-xs text-danger-600 mt-1">{errors.email}</p>}
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <PhoneField value={form.phone} onChange={f('phone')} />
+          <div>
+            <label className="label">Start Date</label>
+            <input type="date" className="input w-full" value={form.joinDate} onChange={e => f('joinDate')(e.target.value)} />
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="label">Department</label>
+            <input type="text" className="input w-full" value={form.department}
+              onChange={e => f('department')(e.target.value)} list="ep-dept-list" placeholder="Select or type…" />
+            <datalist id="ep-dept-list">{departments.map(d => <option key={d} value={d} />)}</datalist>
+          </div>
+          <div>
+            <label className="label">Job Title / Role <span className="text-danger-500">*</span></label>
+            <input type="text" className={`input w-full ${errors.role ? 'border-danger-500' : ''}`}
+              value={form.role} onChange={e => f('role')(e.target.value)}
+              list="ep-role-list" placeholder="e.g. Engineer" />
+            <datalist id="ep-role-list">{ROLES_SUGGESTIONS.map(r => <option key={r} value={r} />)}</datalist>
+            {errors.role && <p className="text-xs text-danger-600 mt-1">{errors.role}</p>}
+          </div>
+        </div>
+        <div>
+          <label className="label">Assigned Shift</label>
+          <select className="input w-full" value={form.shiftId} onChange={e => f('shiftId')(e.target.value)}>
+            <option value="">No shift assigned</option>
+            {shifts.map(s => <option key={s.id} value={s.id}>{s.name} ({s.start} – {s.end})</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="label">Employee ID <span className="text-ink-400 font-normal">(optional)</span></label>
+          <input type="text" className="input font-mono uppercase w-full"
+            value={form.employeeCode} onChange={e => f('employeeCode')(e.target.value.toUpperCase())}
+            placeholder="e.g. HR-001 — leave blank to auto-assign" maxLength={20} />
+        </div>
+        {form.notes && (
+          <div className="p-3 rounded-lg bg-surface-50 border border-surface-200">
+            <p className="label mb-1 text-[10px]">Applicant's Notes</p>
+            <p className="text-xs text-ink-600 leading-relaxed">{form.notes}</p>
+          </div>
+        )}
+
+        {/* ── Mobile App Credentials ── */}
+        <div className="pt-3 border-t border-surface-200">
+          <div className="flex items-center gap-2 mb-3">
+            <div className="w-5 h-5 rounded-md bg-indigo-50 flex items-center justify-center">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#6366f1" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+            </div>
+            <p className="text-xs font-semibold text-slate-700">Mobile App Credentials</p>
+            <span className="text-[10px] text-slate-400 font-normal">(set before approving)</span>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="label">Username</label>
+              <input
+                type="text"
+                value={form.username}
+                onChange={e => f('username')(e.target.value.toLowerCase().replace(/\s/g, ''))}
+                placeholder="e.g. m.santos"
+                className={`input w-full font-mono ${errors.username ? 'border-danger-500' : ''}`}
+                autoComplete="off"
+              />
+              {errors.username
+                ? <p className="text-xs text-danger-600 mt-1">{errors.username}</p>
+                : <p className="text-[10px] text-ink-400 mt-1">Used to log in to the mobile app</p>
+              }
+            </div>
+            <div>
+              <label className="label">Password</label>
+              <div className="relative">
+                <input
+                  type={showPw ? 'text' : 'password'}
+                  value={form.password}
+                  onChange={e => f('password')(e.target.value)}
+                  placeholder="Min 6 characters"
+                  className={`input w-full pr-9 ${errors.password ? 'border-danger-500' : ''}`}
+                  autoComplete="new-password"
+                />
+                <button type="button" onClick={() => setShowPw(v => !v)}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 transition-colors">
+                  {showPw ? <EyeOff size={13} /> : <Eye size={13} />}
+                </button>
+              </div>
+              {errors.password
+                ? <p className="text-xs text-danger-600 mt-1">{errors.password}</p>
+                : form.password && (
+                  <div className="flex gap-1 mt-1.5">
+                    {[1,2,3,4].map(i => (
+                      <div key={i} className={`h-1 flex-1 rounded-full transition-all ${
+                        form.password.length >= i * 3
+                          ? i <= 1 ? 'bg-red-400' : i <= 2 ? 'bg-amber-400' : i <= 3 ? 'bg-blue-400' : 'bg-emerald-400'
+                          : 'bg-slate-200'
+                      }`} />
+                    ))}
+                  </div>
+                )
+              }
+            </div>
+          </div>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+/* ─────────────────────────────────────────────
+   Pending Employee Confirmation Modal
+   Approve or Reject a self-registration request
+───────────────────────────────────────────── */
+function PendingConfirmModal({ pending, action, onClose, onEdit, onConfirm, seatsAvailable }) {
+  const name = [pending.firstName, pending.middleName, pending.lastName, pending.suffix].filter(Boolean).join(' ');
+  const isApprove = action === 'approve';
+
+  return (
+    <Modal
+      open={true}
+      onClose={onClose}
+      title={isApprove ? 'Approve Registration' : 'Reject Registration'}
+      width="max-w-md"
+      footer={
+        <div className="flex gap-2 w-full">
+          <button className="btn-secondary" onClick={onClose}>Cancel</button>
+          {isApprove && (
+            <button className="btn-secondary" onClick={onEdit}>
+              <Pencil size={13} /> Edit First
+            </button>
+          )}
+          <button
+            className={`ml-auto ${isApprove ? 'btn-primary' : 'btn-danger'}`}
+            onClick={onConfirm}
+            disabled={isApprove && seatsAvailable === 0}
+          >
+            {isApprove ? 'Approve & Enroll' : 'Reject Request'}
+          </button>
+        </div>
+      }
+    >
+      <div className="space-y-4">
+        {/* Summary card */}
+        <div className="p-4 rounded-xl bg-surface-50 border border-surface-200 space-y-3">
+          <div className="flex items-center gap-3">
+            <Avatar name={name} size="md" />
+            <div>
+              <p className="font-semibold text-sm text-ink-900">{name}</p>
+              <p className="text-xs text-ink-400">{pending.role}{pending.department ? ` · ${pending.department}` : ''}</p>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            {[
+              { l: 'Email',       v: pending.email },
+              { l: 'Phone',       v: pending.phone || '—' },
+              { l: 'Start Date',  v: pending.joinDate ? new Date(pending.joinDate).toLocaleDateString() : '—' },
+              { l: 'Employee ID', v: pending.employeeCode || 'Will be assigned' },
+            ].map(({ l, v }) => (
+              <div key={l} className="p-2 rounded-lg bg-white border border-surface-100">
+                <p className="label mb-0 text-[10px]">{l}</p>
+                <p className="font-medium text-ink-700 mt-0.5 truncate">{v}</p>
+              </div>
+            ))}
+          </div>
+          {pending.notes && (
+            <div className="p-2 rounded-lg bg-white border border-surface-100">
+              <p className="label mb-0 text-[10px]">Notes from applicant</p>
+              <p className="text-xs text-ink-600 mt-0.5 leading-relaxed">{pending.notes}</p>
+            </div>
+          )}
+        </div>
+
+        {isApprove && seatsAvailable === 0 && (
+          <div className="p-3 rounded-lg bg-warning-50 border border-warning-200 text-xs text-warning-700">
+            Seat limit reached. Upgrade your plan to approve more employees.
+          </div>
+        )}
+
+        <p className="text-sm text-ink-600">
+          {isApprove
+            ? 'This will enroll the applicant as an active employee. You can also click "Edit First" to adjust their details before enrolling.'
+            : 'This will permanently remove this registration request. The applicant will need to re-submit if rejected by mistake.'}
+        </p>
+      </div>
+    </Modal>
+  );
+}
+
+/* ─────────────────────────────────────────────
+   Registration Link Modal
+   Lets admins copy the self-registration URL
+───────────────────────────────────────────── */
+function RegisterLinkModal({ onClose }) {
+  const [copied, setCopied] = useState(false);
+  const url = `${window.location.origin}/register`;
+
+  function copy() {
+    navigator.clipboard.writeText(url).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }
+
+  return (
+    <Modal open={true} onClose={onClose} title="Employee Self-Registration Link" width="max-w-md"
+      footer={<button className="btn-secondary ml-auto" onClick={onClose}>Close</button>}
+    >
+      <div className="space-y-4">
+        <p className="text-sm text-ink-600 leading-relaxed">
+          Share this link with employees so they can fill out their own registration form. Their request will appear in the <strong>Pending Registrations</strong> section for you to review.
+        </p>
+        <div className="flex items-center gap-2 p-3 rounded-xl bg-surface-50 border border-surface-200">
+          <span className="flex-1 text-sm font-mono text-brand-600 truncate select-all">{url}</span>
+          <button onClick={copy}
+            className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all"
+            style={{
+              background: copied ? '#f0fdf4' : '#eef2ff',
+              color: copied ? '#16a34a' : '#6366f1',
+              border: `1px solid ${copied ? '#bbf7d0' : '#c7d2fe'}`,
+            }}>
+            {copied ? <CheckCircle size={12} /> : <ClipboardCopy size={12} />}
+            {copied ? 'Copied!' : 'Copy'}
+          </button>
+        </div>
+        <p className="text-xs text-ink-400">
+          Anyone with this link can submit a registration. Only admins and HR can approve or reject requests.
+        </p>
+      </div>
+    </Modal>
+  );
+}
 
 /* ─────────────────────────────────────────────
    Employee Analytics Modal
@@ -769,7 +1495,7 @@ function EmployeeAnalyticsModal({ open, onClose, employee, attendance, shifts })
 
         {/* ── Header ── */}
         <div className="flex items-center gap-4 p-4 rounded-xl bg-surface-50 border border-surface-200">
-          <Avatar name={`${employee.firstName} ${employee.lastName}`} color={employee.avatarColor} size="xl" />
+          <Avatar name={`${employee.firstName} ${employee.lastName}`} color={employee.avatarColor} size="xl" src={employee.profilePhotoUrl} />
           <div className="flex-1 min-w-0">
             <p className="font-bold text-ink-900 text-sm">{[employee.firstName, employee.middleName, employee.lastName, employee.suffix].filter(Boolean).join(' ')}</p>
             <p className="text-xs text-ink-400">{employee.role} · {employee.department}</p>
