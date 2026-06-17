@@ -5,6 +5,7 @@ import { SubscriptionProvider, useSubscription } from './context/SubscriptionCon
 import { ToastProvider } from './context/ToastContext';
 import { NotificationsProvider } from './context/NotificationsContext';
 import AppLayout from './components/layout/AppLayout';
+import PlanGate from './components/PlanGate';
 import LoadingScreen from './components/LoadingScreen';
 
 import LandingPage from './pages/public/LandingPage';
@@ -124,7 +125,7 @@ function AppRoutes() {
         <Route path="subscription" element={<RoleRoute roles={['admin']}><SubscriptionPage /></RoleRoute>} />
         <Route path="employees"    element={<RoleRoute roles={['admin','hr','manager']}><EmployeesPage /></RoleRoute>} />
         <Route path="reports"      element={<RoleRoute roles={['admin','hr','manager']}><ReportsPage /></RoleRoute>} />
-        <Route path="shifts"       element={<RoleRoute roles={['admin','hr']}><ShiftsPage /></RoleRoute>} />
+        <Route path="shifts"       element={<RoleRoute roles={['admin','hr']}><PlanGate feature="shifts"><ShiftsPage /></PlanGate></RoleRoute>} />
         <Route path="departments"  element={<RoleRoute roles={['admin','hr']}><DepartmentsPage /></RoleRoute>} />
         <Route path="settings"     element={<RoleRoute roles={['admin']}><SettingsPage /></RoleRoute>} />
       </Route>

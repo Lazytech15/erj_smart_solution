@@ -11,7 +11,7 @@ const ALL_FEATURES = [
   'Basic leave management',
   'CSV export',
   'Email support',
-  'Mobile App QR Location Scan', // Changed to reflect Starter plan functionality
+  'Mobile App Clock-In (GPS + QR Shift Scan)', // Phone-based clock-in via GPS or onsite QR
   'Desktop Kiosk (Electron App)', // Added for Growth plan
   'Barcode / QR ID Badge Support', // Added for Growth plan
   'Shift management',
@@ -35,10 +35,11 @@ const PLAN_CONFIG = {
     originalPrice: null, discount: null,
     includedFeatures: new Set([
       'Up to employees limit',
-      'Manual Web Clock-In / Out', // Only manual entry on web for Free
+      'Manual Web Clock-In / Out',
       'Attendance records',
       'Basic leave management',
       'CSV export',
+      'Shift management',
     ]),
   },
   starter: {
@@ -52,7 +53,8 @@ const PLAN_CONFIG = {
       'Basic leave management',
       'CSV export',
       'Email support',
-      'Mobile App QR Location Scan', // Unlocked: Phone-based scanning
+      'Mobile App Clock-In (GPS + QR Shift Scan)',
+      'Shift management',
     ]),
   },
   growth: {
@@ -66,7 +68,7 @@ const PLAN_CONFIG = {
       'Basic leave management',
       'CSV export',
       'Email support',
-      'Mobile App QR Location Scan',
+      'Mobile App Clock-In (GPS + QR Shift Scan)',
       'Desktop Kiosk (Electron App)', // Unlocked: Entrance Kiosk PC
       'Barcode / QR ID Badge Support', // Unlocked: Scanner integration
       'Shift management',
@@ -88,7 +90,7 @@ const PLAN_CONFIG = {
       'Basic leave management',
       'CSV export',
       'Email support',
-      'Mobile App QR Location Scan',
+      'Mobile App Clock-In (GPS + QR Shift Scan)',
       'Desktop Kiosk (Electron App)',
       'Barcode / QR ID Badge Support',
       'Shift management',
@@ -118,15 +120,15 @@ function getFeatureLabel(feature, plan) {
 const FEATURE_GROUPS = [
   { 
     label: 'Core & Basics', 
-    features: ['Up to employees limit', 'Manual Web Clock-In / Out', 'Attendance records', 'Basic leave management', 'CSV export'] 
+    features: ['Up to employees limit', 'Manual Web Clock-In / Out', 'Attendance records', 'Basic leave management', 'CSV export', 'Shift management'] 
   },
   { 
     label: 'Mobile & On-Site Hardware', 
-    features: ['Mobile App QR Location Scan', 'Desktop Kiosk (Electron App)', 'Barcode / QR ID Badge Support', 'Standalone NFC Hardware Box', 'Smart NFC ID Card Tokens'] 
+    features: ['Mobile App Clock-In (GPS + QR Shift Scan)', 'Desktop Kiosk (Electron App)', 'Barcode / QR ID Badge Support', 'Standalone NFC Hardware Box', 'Smart NFC ID Card Tokens'] 
   },
   { 
     label: 'Team Management & Comms', 
-    features: ['Shift management', 'Department management', 'Analytics & reports', 'Overtime tracking', 'SMS notifications', 'Email support', 'Priority support'] 
+    features: ['Department management', 'Analytics & reports', 'Overtime tracking', 'SMS notifications', 'Email support', 'Priority support'] 
   },
   { 
     label: 'Enterprise Infrastructure', 

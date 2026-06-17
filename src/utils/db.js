@@ -9,8 +9,6 @@ export async function getAccount(email) {
     .eq('email', email)
     .single();
   if (error) return null;
-  // Map snake_case columns to camelCase so the rest of the app
-  // can use consistent field names (subscriptionId, employeeId, etc.)
   return {
     email:          data.email,
     password:       data.password,
@@ -41,23 +39,65 @@ export async function putAccount(account) {
 // ── Subscription helpers ─────────────────────────────────────────────────────
 
 export async function getSubscription(subscriptionId) {
-  const { data, error } = await supabase
-    .from('subscriptions')
-    .select('*')
-    .eq('subscription_id', subscriptionId)
-    .single();
+  // Fetch subscription and employee accounts in parallel.
+  // The accounts table is the source of truth for employee_id as used by the
+  // mobile app — we cross-reference it so leave requests submitted from mobile
+  // (which use accounts.employee_id) can be matched to enrolledEmployees
+  // (which use a separately-generated Date.now() id that may differ by a few ms).
+  const [{ data, error }, { data: accountRows }] = await Promise.all([
+    supabase.from('subscriptions').select('*').eq('subscription_id', subscriptionId).single(),
+    supabase.from('accounts').select('employee_id, name').eq('subscription_id', subscriptionId).eq('role', 'employee'),
+  ]);
   if (error) return null;
+
+  // Build a name → accountEmployeeId map from the accounts table.
+  // We normalise names to lowercase for fuzzy matching.
+  const accountsByName = {};
+  for (const row of (accountRows ?? [])) {
+    if (row.employee_id) {
+      accountsByName[row.name?.toLowerCase().trim()] = String(row.employee_id);
+    }
+  }
+
+  // Attach accountEmployeeId to each enrolled employee so LeavePage can match
+  // leave requests on EITHER id (enrolledEmployee.id OR accountEmployeeId).
+  const enrolledEmployees = (data.enrolled_employees ?? []).map(emp => {
+    const fullName = `${emp.firstName ?? ''} ${emp.lastName ?? ''}`.toLowerCase().trim();
+    const accountEmployeeId = accountsByName[fullName] ?? null;
+    return {
+      ...emp,
+      id: emp.id != null ? String(emp.id) : emp.id,
+      // The ID as stored in accounts.employee_id — what mobile app uses
+      accountEmployeeId: accountEmployeeId ?? (emp.accountEmployeeId ? String(emp.accountEmployeeId) : null),
+    };
+  });
+
+  // Normalise leave requests: handle mobile-submitted records that use
+  // `type` instead of `leaveType`, `submittedAt` instead of `createdAt`.
+  const leaveRequests = (data.leave_requests ?? []).map(r => ({
+    ...r,
+    leaveType:  r.leaveType  ?? r.type        ?? '',
+    createdAt:  r.createdAt  ?? r.submittedAt ?? null,
+    employeeId: r.employeeId != null ? String(r.employeeId) : r.employeeId,
+  }));
+
   return {
     subscriptionId:    data.subscription_id,
     planId:            data.plan_id,
     company:           data.company,
     billing:           data.billing,
-    enrolledEmployees: data.enrolled_employees ?? [],
+    enrolledEmployees,
     departments:       data.departments        ?? [],
     shifts:            data.shifts             ?? [],
-    attendanceRecords: data.attendance_records ?? [],
-    leaveRequests:     data.leave_requests     ?? [],
-    settings:          data.settings           ?? {},
+    attendanceRecords: (data.attendance_records ?? []).map(r => ({
+      ...r,
+      employeeId: r.employeeId != null ? String(r.employeeId) : r.employeeId,
+    })),
+    leaveRequests,
+    settings: {
+      leaveTypes: [],
+      ...(data.settings ?? {}),
+    },
     status:            data.status,
     trialEndsAt:       data.trial_ends_at,
     createdAt:         data.created_at,
@@ -85,8 +125,6 @@ export async function putSubscription(state) {
 }
 
 // ── Pending Registrations helpers ─────────────────────────────────────────────
-// Uses a separate `pending_registrations` table so pending requests are
-// independent of the subscription blob and auto-cleaned on approve/reject.
 
 export async function getPendingRegistrations(subscriptionId) {
   const { data, error } = await supabase
@@ -140,7 +178,7 @@ export async function insertPendingRegistration(subscriptionId, form) {
     .select()
     .single();
   if (error) throw error;
-  return data.id; // uuid from DB
+  return data.id;
 }
 
 export async function updatePendingRegistration(id, form) {
@@ -173,6 +211,7 @@ export async function deletePendingRegistration(id) {
     .eq('id', id);
   if (error) throw error;
 }
+
 // ── Announcements helpers ─────────────────────────────────────────────────────
 
 export async function getAnnouncements(subscriptionId) {
@@ -236,11 +275,8 @@ export async function deleteAnnouncement(id) {
 }
 
 // ── Employee Mobile Account helpers ──────────────────────────────────────────
-// Creates a login account in the `accounts` table for mobile app use.
-// Role is always 'employee' for these accounts.
 
 export async function createEmployeeAccount({ employeeId, subscriptionId, name, email, username, password }) {
-  // Check username is not already taken
   const { data: existing } = await supabase
     .from('accounts')
     .select('id')
@@ -251,9 +287,9 @@ export async function createEmployeeAccount({ employeeId, subscriptionId, name, 
   const { error } = await supabase
     .from('accounts')
     .insert({
-      id:              username,        // use username as the login id
+      id:              username,
       email:           email,
-      password:        password,        // plain — hash on server/mobile side if needed
+      password:        password,
       role:            'employee',
       name:            name,
       employee_id:     employeeId,
@@ -267,8 +303,6 @@ export async function updateEmployeeAccount(employeeId, { username, password, na
   if (name)     updates.name     = name;
   if (email)    updates.email    = email;
   if (password) updates.password = password;
-
-  // `id` is the username column — update it if provided
   if (username) updates.id = username;
 
   if (Object.keys(updates).length === 0) return;
@@ -290,4 +324,28 @@ export async function getEmployeeAccount(employeeId) {
     .maybeSingle();
   if (error || !data) return null;
   return { username: data.id, email: data.email, name: data.name };
+}
+// ── Attendance-only helpers ───────────────────────────────────────────────────
+
+/** Fetch only the attendance_records column — avoids overwriting mobile data. */
+export async function getAttendanceRecords(subscriptionId) {
+  const { data, error } = await supabase
+    .from('subscriptions')
+    .select('attendance_records')
+    .eq('subscription_id', subscriptionId)
+    .single();
+  if (error) return null;
+  return (data.attendance_records ?? []).map(r => ({
+    ...r,
+    employeeId: r.employeeId != null ? String(r.employeeId) : r.employeeId,
+  }));
+}
+
+/** Patch ONLY the attendance_records column — leaves all other columns untouched. */
+export async function putAttendanceRecords(subscriptionId, records) {
+  const { error } = await supabase
+    .from('subscriptions')
+    .update({ attendance_records: records })
+    .eq('subscription_id', subscriptionId);
+  if (error) throw error;
 }

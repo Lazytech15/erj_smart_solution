@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
-import { getSubscription, putSubscription, getPendingRegistrations, insertPendingRegistration, updatePendingRegistration, deletePendingRegistration, createEmployeeAccount, updateEmployeeAccount, getEmployeeAccount } from '../utils/db';
+import { getSubscription, putSubscription, getAttendanceRecords, putAttendanceRecords, getPendingRegistrations, insertPendingRegistration, updatePendingRegistration, deletePendingRegistration, createEmployeeAccount, updateEmployeeAccount, getEmployeeAccount } from '../utils/db';
 import { useAuth } from './AuthContext';
 
 export const PLANS = [
@@ -17,8 +17,8 @@ export const PLANS = [
     name: 'Starter', tagline: 'For small teams getting started',
     price: 150, currency: 'PHP', period: 'employee / month', maxSeats: 25,
     color: '#26c6da', colorDark: '#00acc1', badge: null,
-    features: ['Up to 25 employees','Clock-in / Clock-out','Attendance records','Basic leave management','CSV export','Email support','Mobile app (iOS & Android)'],
-    limits: { reports: false, shifts: false, departments: false, biometric: false, api: false, sms: false, mobileApp: true, emailNotifs: true },
+    features: ['Up to 25 employees','Clock-in / Clock-out','Attendance records','Basic leave management','CSV export','Email support','Mobile app (iOS & Android)','Shift management'],
+    limits: { reports: false, shifts: true, departments: false, biometric: false, api: false, sms: false, mobileApp: true, emailNotifs: true },
   },
   {
     id: 'growth',
@@ -93,7 +93,23 @@ export function SubscriptionProvider({ children }) {
     return () => { cancelled = true; };
   }, [user?.subscriptionId]); // eslint-disable-line
 
-  // ── Core mutator: reads ref (always fresh), writes state + IndexedDB ────────
+  // ── Poll attendance_records every 15 s so mobile clock-ins appear live ───────
+  useEffect(() => {
+    if (!user?.subscriptionId) return;
+    const interval = setInterval(async () => {
+      const records = await getAttendanceRecords(user.subscriptionId);
+      if (records === null) return; // fetch failed — keep existing
+      setSubscription(prev => {
+        if (!prev) return prev;
+        // Skip re-render if records haven't changed
+        if (JSON.stringify(prev.attendanceRecords) === JSON.stringify(records)) return prev;
+        return { ...prev, attendanceRecords: records };
+      });
+    }, 15000); // every 15 seconds
+    return () => clearInterval(interval);
+  }, [user?.subscriptionId]); // eslint-disable-line
+
+  // ── Core mutator: reads ref (always fresh), writes state + Supabase ──────────
   const update = useCallback((updater) => {
     const current = subRef.current;
     if (!current) {
@@ -132,6 +148,7 @@ export function SubscriptionProvider({ children }) {
         autoClockout: true, requireReason: true, encryptPayloads: true,
         emailNotifs: true, smsNotifs: false, biometricSync: false,
         mobileClockIn: true, geoFencing: false, maxLeavePerMonth: '5',
+        leaveTypes: [],
       },
       createdAt: new Date().toISOString(),
       status: isTrial ? 'trialing' : 'active',
@@ -167,6 +184,7 @@ export function SubscriptionProvider({ children }) {
               ? employee.employeeCode.trim().toUpperCase()
               : `ERJ-${rand}${String(empId).slice(-3)}`,
             status: 'active',
+            accountEmployeeId: String(empId),
             avatarColor: AVATAR_COLORS[prev.enrolledEmployees.length % AVATAR_COLORS.length],
           },
         ],
@@ -238,21 +256,25 @@ export function SubscriptionProvider({ children }) {
 
   // ── Attendance ────────────────────────────────────────────────────────────────
   const addAttendanceRecord = useCallback((record) => {
-    update(prev => ({
-      ...prev,
-      attendanceRecords: [
-        ...prev.attendanceRecords,
-        { ...record, id: `att_${Date.now()}_${Math.random().toString(36).slice(2, 6)}` },
-      ],
-    }));
-  }, [update]);
+    const newRecord = { ...record, id: `att_${Date.now()}_${Math.random().toString(36).slice(2, 6)}` };
+    setSubscription(prev => {
+      if (!prev) return prev;
+      const updated = { ...prev, attendanceRecords: [...prev.attendanceRecords, newRecord] };
+      // Only patch attendance_records column — avoids overwriting mobile clock-ins
+      putAttendanceRecords(prev.subscriptionId, updated.attendanceRecords);
+      return updated;
+    });
+  }, []); // eslint-disable-line
 
   const updateAttendanceRecord = useCallback((recordId, updates) => {
-    update(prev => ({
-      ...prev,
-      attendanceRecords: prev.attendanceRecords.map(r => r.id === recordId ? { ...r, ...updates } : r),
-    }));
-  }, [update]);
+    setSubscription(prev => {
+      if (!prev) return prev;
+      const updatedRecords = prev.attendanceRecords.map(r => r.id === recordId ? { ...r, ...updates } : r);
+      // Only patch attendance_records column — avoids overwriting mobile clock-ins
+      putAttendanceRecords(prev.subscriptionId, updatedRecords);
+      return { ...prev, attendanceRecords: updatedRecords };
+    });
+  }, []); // eslint-disable-line
 
   // ── Leave ─────────────────────────────────────────────────────────────────────
   const addLeaveRequest = useCallback((req) => {
@@ -274,6 +296,82 @@ export function SubscriptionProvider({ children }) {
     update(prev => ({
       ...prev,
       leaveRequests: prev.leaveRequests.map(r => r.id === reqId ? { ...r, ...updates } : r),
+    }));
+  }, [update]);
+
+  // ── Leave Types ───────────────────────────────────────────────────────────────
+  const addLeaveType = useCallback((name, defaultBalance) => {
+    update(prev => {
+      const existing = prev.settings?.leaveTypes ?? [];
+      if (existing.some(t => t.name.toLowerCase() === name.toLowerCase())) {
+        throw new Error(`Leave type "${name}" already exists.`);
+      }
+      const days = Number(defaultBalance) || 0;
+      return {
+        ...prev,
+        settings: {
+          ...prev.settings,
+          leaveTypes: [
+            ...existing,
+            { name, defaultBalance: days },
+          ],
+        },
+        // Seed all existing employees with the default balance for this new type
+        enrolledEmployees: prev.enrolledEmployees.map(emp => ({
+          ...emp,
+          leaveBalances: {
+            [name]: days,          // default for new type
+            ...(emp.leaveBalances ?? {}), // don't overwrite if already set
+          },
+        })),
+      };
+    });
+  }, [update]);
+
+  const updateLeaveType = useCallback((name, updates) => {
+    update(prev => ({
+      ...prev,
+      settings: {
+        ...prev.settings,
+        leaveTypes: (prev.settings?.leaveTypes ?? []).map(t =>
+          t.name === name ? { ...t, ...updates } : t
+        ),
+      },
+    }));
+  }, [update]);
+
+  const removeLeaveType = useCallback((name) => {
+    update(prev => ({
+      ...prev,
+      // Remove from leaveTypes list
+      settings: {
+        ...prev.settings,
+        leaveTypes: (prev.settings?.leaveTypes ?? []).filter(t => t.name !== name),
+      },
+      // Clear this leave type from every employee's leaveBalances
+      enrolledEmployees: prev.enrolledEmployees.map(emp => {
+        if (!emp.leaveBalances || !(name in emp.leaveBalances)) return emp;
+        const { [name]: _removed, ...rest } = emp.leaveBalances;
+        return { ...emp, leaveBalances: rest };
+      }),
+    }));
+  }, [update]);
+
+  // ── Leave Balances ────────────────────────────────────────────────────────────
+  const setEmployeeLeaveBalance = useCallback((employeeId, typeName, value) => {
+    update(prev => ({
+      ...prev,
+      enrolledEmployees: prev.enrolledEmployees.map(emp =>
+        String(emp.id) === String(employeeId)
+          ? {
+              ...emp,
+              leaveBalances: {
+                ...(emp.leaveBalances ?? {}),
+                [typeName]: Number(value) || 0,
+              },
+            }
+          : emp
+      ),
     }));
   }, [update]);
 
@@ -314,6 +412,7 @@ export function SubscriptionProvider({ children }) {
             ? rest.employeeCode.trim().toUpperCase()
             : `ERJ-${rand}${String(empId).slice(-3)}`,
           status: 'active',
+          accountEmployeeId: String(empId),
           avatarColor: AVATAR_COLORS[prev.enrolledEmployees.length % AVATAR_COLORS.length],
         },
       ],
@@ -370,6 +469,8 @@ export function SubscriptionProvider({ children }) {
       cancelSubscription, upgradePlan, clearSubscription, updateSettings,
       addAttendanceRecord, updateAttendanceRecord,
       addLeaveRequest, updateLeaveRequest,
+      addLeaveType, updateLeaveType, removeLeaveType,
+      setEmployeeLeaveBalance,
       addDepartment, removeDepartment,
       addShift, removeShift, updateShift,
     }}>

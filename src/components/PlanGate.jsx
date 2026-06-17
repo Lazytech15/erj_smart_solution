@@ -3,16 +3,16 @@ import { Lock, ArrowUpRight, Zap, BarChart3, FileText, Building2, Fingerprint, W
 import { useSubscription, PLANS } from '../context/SubscriptionContext';
 
 const FEATURE_META = {
+  shifts: {
+    icon: FileText,
+    title: 'Shift Management',
+    description: 'Create and manage work shifts, assign employees to schedules, and automate attendance calculations based on shift times.',
+    requiredPlan: 'starter',
+  },
   reports: {
     icon: BarChart3,
     title: 'Analytics & Reports',
     description: 'Visual attendance trends, department breakdowns, and leave statistics to keep your team insights sharp.',
-    requiredPlan: 'growth',
-  },
-  shifts: {
-    icon: FileText,
-    title: 'Shift Management',
-    description: 'Define morning, day, afternoon, and night shifts and assign them to employees across your organisation.',
     requiredPlan: 'growth',
   },
   departments: {
@@ -115,7 +115,7 @@ export default function PlanGate({ feature, children }) {
                 </span>
               )}
               <p className="font-bold text-ink-900 text-sm">{plan.name} Plan</p>
-              <p className="text-xs text-ink-400 mb-3">${plan.price}/employee/month</p>
+              <p className="text-xs text-ink-400 mb-3">₱{plan.price}/employee/month</p>
               <ul className="space-y-1.5">
                 {plan.features.slice(0, 4).map(f => (
                   <li key={f} className="text-[11px] text-ink-500 flex items-start gap-1.5">

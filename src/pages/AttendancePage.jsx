@@ -68,7 +68,10 @@ export default function AttendancePage() {
     let recs = attendanceRecords
       .filter(r => r.date === date)
       .map(r => {
-        const employee = employees.find(e => String(e.id) === String(r.employeeId));
+        const employee = employees.find(e =>
+          String(e.id) === String(r.employeeId) ||
+          (e.accountEmployeeId && String(e.accountEmployeeId) === String(r.employeeId))
+        );
         const shift    = employee?.shiftId ? shifts.find(s => String(s.id) === String(employee.shiftId)) : null;
         return { ...r, employee, shift };
       })
