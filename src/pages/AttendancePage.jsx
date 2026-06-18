@@ -2,24 +2,33 @@ import { useState, useMemo } from 'react';
 import { format, subDays, parseISO } from 'date-fns';
 import { Clock, ChevronLeft, ChevronRight, Plus, Download } from 'lucide-react';
 import { useSubscription } from '../context/SubscriptionContext';
-import { fmt } from '../utils/dateTime';
+import { fmt, getSessionPunches, getShiftSessions, computeWorkedMinutes, minutesToHHMM } from '../utils/dateTime';
 import { StatusBadge, Avatar, SearchInput, SelectField, SectionHeader, EmptyState, Modal, InputField } from '../components/ui';
 import { useToast } from '../context/ToastContext';
 import { useAuth } from '../context/AuthContext';
 
 function exportToCSV(records, date) {
-  const headers = ['Employee Code', 'First Name', 'Last Name', 'Department', 'Shift', 'Clock In', 'Clock Out', 'Status', 'Notes'];
-  const rows = records.map(r => [
-    r.employee.employeeCode || '',
-    r.employee.firstName,
-    r.employee.lastName,
-    r.employee.department || '',
-    r.shift ? `${r.shift.name} (${r.shift.start}–${r.shift.end})` : '',
-    r.clockIn  || '',
-    r.clockOut || '',
-    r.status,
-    r.notes   || '',
-  ]);
+  const headers = ['Employee Code', 'First Name', 'Last Name', 'Department', 'Shift', 'Clock In', 'Clock Out', 'Hours Worked', 'Session Detail', 'Status', 'Notes'];
+  const rows = records.map(r => {
+    const punches = getSessionPunches(r);
+    const sessionDetail = punches
+      .map(p => `${p.label ? p.label + ' ' : ''}${p.clockIn || '—'}-${p.clockOut || '—'}`)
+      .join(' | ');
+    const minutes = computeWorkedMinutes(r);
+    return [
+      r.employee.employeeCode || '',
+      r.employee.firstName,
+      r.employee.lastName,
+      r.employee.department || '',
+      r.shift ? `${r.shift.name} (${r.shift.start}–${r.shift.end})` : '',
+      r.clockIn  || '',
+      r.clockOut || '',
+      minutes ? minutesToHHMM(minutes) : '',
+      sessionDetail,
+      r.status,
+      r.notes   || '',
+    ];
+  });
   const csv = [headers, ...rows]
     .map(row => row.map(v => `"${String(v).replace(/"/g, '""')}"`).join(','))
     .join('\n');
@@ -44,6 +53,47 @@ function calcStatus(clockInTime, shiftStart, lateThresholdMin = 15) {
   const shiftMins = sh * 60 + sm;
   if (clockMins <= shiftMins + lateThresholdMin) return 'present';
   return 'late';
+}
+
+/** Build the editable punch list for the attendance form, matching whatever
+ *  sessions the employee's shift is configured with (1 pair for a standard
+ *  shift, or several for a split shift). Existing saved punches are reused
+ *  when editing; a legacy clockIn/clockOut-only record is seeded into the
+ *  first/last session as a best-effort migration. */
+function deriveFormSessions(shift, record) {
+  const shiftSessions = getShiftSessions(shift);
+  return shiftSessions.map((ss, i) => ({
+    sessionId: ss.id,
+    label: ss.label,
+    clockIn:  record?.sessions?.[i]?.clockIn  ?? (i === 0 ? (record?.clockIn || '') : ''),
+    clockOut: record?.sessions?.[i]?.clockOut ?? (i === shiftSessions.length - 1 ? (record?.clockOut || '') : ''),
+  }));
+}
+
+/** Collapse the form's punch list back into a saved record: keeps a full
+ *  `sessions` breakdown plus legacy top-level clockIn/clockOut (first
+ *  session's in, last session's out) so older parts of the app that only
+ *  know about a single pair keep working unchanged. */
+function finalizeRecord(form) {
+  const sessions = (form.sessions || [])
+    .filter(s => s.clockIn || s.clockOut)
+    .map(({ sessionId, label, clockIn, clockOut }) => ({ sessionId, label, clockIn, clockOut }));
+  return {
+    employeeId: form.employeeId,
+    status: form.status,
+    notes: form.notes,
+    sessions,
+    clockIn:  sessions[0]?.clockIn || '',
+    clockOut: sessions[sessions.length - 1]?.clockOut || '',
+  };
+}
+
+// Use accountEmployeeId as the record's employeeId when available — this is
+// the ID that accounts.employee_id holds, so records written here match what
+// the mobile app reads when filtering by its own employee_id.
+// Falls back to e.id for employees not yet linked to a mobile account.
+function empRecordId(e) {
+  return e.accountEmployeeId ? String(e.accountEmployeeId) : String(e.id);
 }
 
 export default function AttendancePage() {
@@ -95,13 +145,13 @@ export default function AttendancePage() {
   }
 
   function handleAddRecord(form) {
-    addAttendanceRecord({ ...form, date });
+    addAttendanceRecord({ ...finalizeRecord(form), date });
     toast('Attendance record added', 'success');
     setAddModal(false);
   }
 
   function handleEditRecord(form) {
-    updateAttendanceRecord(editRecord.id, form);
+    updateAttendanceRecord(editRecord.id, finalizeRecord(form));
     toast('Record updated', 'success');
     setEditRecord(null);
   }
@@ -165,8 +215,8 @@ export default function AttendancePage() {
                 <th>Employee</th>
                 <th>Department</th>
                 <th>Shift</th>
-                <th>Clock In</th>
-                <th>Clock Out</th>
+                <th>Time Log</th>
+                <th>Hours</th>
                 <th>Status</th>
                 {can('edit_all') && <th>Actions</th>}
               </tr>
@@ -197,8 +247,25 @@ export default function AttendancePage() {
                       <span className="text-xs text-ink-300">—</span>
                     )}
                   </td>
-                  <td><span className="text-xs text-ink-600">{rec.clockIn || '—'}</span></td>
-                  <td><span className="text-xs text-ink-600">{rec.clockOut || '—'}</span></td>
+                  <td>
+                    {getSessionPunches(rec).length === 0 ? (
+                      <span className="text-xs text-ink-300">—</span>
+                    ) : (
+                      <div className="flex flex-col gap-0.5">
+                        {getSessionPunches(rec).map((p, i) => (
+                          <div key={i} className="text-[11px] text-ink-600 whitespace-nowrap">
+                            {p.label && <span className="text-ink-400 font-medium">{p.label}: </span>}
+                            {p.clockIn || '—'} – {p.clockOut || '—'}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </td>
+                  <td>
+                    <span className="text-xs text-ink-600">
+                      {computeWorkedMinutes(rec) ? minutesToHHMM(computeWorkedMinutes(rec)) : '—'}
+                    </span>
+                  </td>
                   <td><StatusBadge status={rec.status} /></td>
                   {can('edit_all') && (
                     <td>
@@ -221,28 +288,37 @@ export default function AttendancePage() {
         shifts={shifts}
         lateThreshold={lateThreshold}
         title="Add Attendance Record"
-        initial={{ employeeId: '', clockIn: '', clockOut: '', status: 'present', notes: '' }}
+        initial={{ employeeId: '', sessions: [], status: 'present', notes: '' }}
       />
 
       {/* Edit Record Modal */}
-      {editRecord && (
-        <AttendanceModal
-          open={!!editRecord}
-          onClose={() => setEditRecord(null)}
-          onSave={handleEditRecord}
-          employees={employees}
-          shifts={shifts}
-          lateThreshold={lateThreshold}
-          title="Edit Attendance Record"
-          initial={{
-            employeeId: editRecord.employeeId,
-            clockIn:    editRecord.clockIn  || '',
-            clockOut:   editRecord.clockOut || '',
-            status:     editRecord.status,
-            notes:      editRecord.notes   || '',
-          }}
-        />
-      )}
+      {editRecord && (() => {
+        const emp = employees.find(e =>
+          String(e.id) === String(editRecord.employeeId) ||
+          (e.accountEmployeeId && String(e.accountEmployeeId) === String(editRecord.employeeId))
+        );
+        const shift = emp?.shiftId ? shifts.find(s => String(s.id) === String(emp.shiftId)) : null;
+        // Normalise the employeeId to match empOptions values (accountEmployeeId-first)
+        // so the dropdown pre-selects the correct employee when editing old records.
+        const normalizedEmpId = emp ? empRecordId(emp) : editRecord.employeeId;
+        return (
+          <AttendanceModal
+            open={!!editRecord}
+            onClose={() => setEditRecord(null)}
+            onSave={handleEditRecord}
+            employees={employees}
+            shifts={shifts}
+            lateThreshold={lateThreshold}
+            title="Edit Attendance Record"
+            initial={{
+              employeeId: normalizedEmpId,
+              sessions: deriveFormSessions(shift, editRecord),
+              status: editRecord.status,
+              notes: editRecord.notes || '',
+            }}
+          />
+        );
+      })()}
     </div>
   );
 }
@@ -253,27 +329,50 @@ function AttendanceModal({ open, onClose, onSave, employees, shifts, lateThresho
 
   const empOptions = [
     { value: '', label: 'Select employee…' },
-    ...employees.map(e => ({ value: e.id, label: `${e.firstName} ${e.lastName}` })),
+    ...employees.map(e => ({ value: empRecordId(e), label: `${e.firstName} ${e.lastName}` })),
   ];
 
-  // Derive the selected employee's assigned shift
-  const selectedEmp   = employees.find(e => String(e.id) === String(form.employeeId));
+  // Match on EITHER id or accountEmployeeId so edits to existing records work
+  // regardless of which ID was stored when the record was originally created.
+  const selectedEmp = employees.find(e =>
+    String(e.id) === String(form.employeeId) ||
+    (e.accountEmployeeId && String(e.accountEmployeeId) === String(form.employeeId))
+  );
   const assignedShift = selectedEmp?.shiftId
     ? shifts.find(s => String(s.id) === String(selectedEmp.shiftId))
     : null;
 
-  // Auto-fill status when employee or clock-in changes
+  // When the employee changes, rebuild the punch list to match their shift's
+  // sessions (1 pair for standard, several for split) and re-run the status
+  // auto-calc against the first session's clock-in, if already filled in.
   function handleEmployeeChange(empId) {
-    const emp   = employees.find(e => String(e.id) === String(empId));
+    const emp = employees.find(e =>
+      String(e.id) === String(empId) ||
+      (e.accountEmployeeId && String(e.accountEmployeeId) === String(empId))
+    );
     const shift = emp?.shiftId ? shifts.find(s => String(s.id) === String(emp.shiftId)) : null;
-    const auto  = form.clockIn && shift ? calcStatus(form.clockIn, shift.start, lateThreshold) : form.status;
-    setForm(p => ({ ...p, employeeId: empId, status: auto || p.status }));
+    const newSessions = deriveFormSessions(shift, null);
+    const firstClockIn = form.sessions?.[0]?.clockIn;
+    const auto = firstClockIn && shift ? calcStatus(firstClockIn, shift.start, lateThreshold) : form.status;
+    setForm(p => ({ ...p, employeeId: empId, sessions: newSessions, status: auto || p.status }));
   }
 
-  function handleClockInChange(time) {
-    const auto = time && assignedShift ? calcStatus(time, assignedShift.start, lateThreshold) : '';
-    setForm(p => ({ ...p, clockIn: time, ...(auto ? { status: auto } : {}) }));
+  // Editing the first session's clock-in re-evaluates present/late; every
+  // other field is just stored as typed.
+  function updatePunch(idx, key, value) {
+    setForm(p => {
+      const sessions = [...(p.sessions || [])];
+      sessions[idx] = { ...sessions[idx], [key]: value };
+      let status = p.status;
+      if (idx === 0 && key === 'clockIn' && assignedShift) {
+        const auto = calcStatus(value, assignedShift.start, lateThreshold);
+        if (auto) status = auto;
+      }
+      return { ...p, sessions, status };
+    });
   }
+
+  const sessions = form.sessions || [];
 
   return (
     <Modal open={open} onClose={onClose} title={title} width="max-w-md"
@@ -293,13 +392,45 @@ function AttendanceModal({ open, onClose, onSave, employees, shifts, lateThresho
             <span className="w-2 h-2 rounded-full shrink-0" style={{ background: assignedShift.color }} />
             <span className="text-xs font-medium" style={{ color: assignedShift.color }}>
               {assignedShift.name} · {assignedShift.start} – {assignedShift.end}
+              {assignedShift.clockType === 'split' && assignedShift.sessions?.length ? ` · ${assignedShift.sessions.length} sessions` : ''}
             </span>
           </div>
         )}
 
-        <div className="grid grid-cols-2 gap-3">
-          <InputField label="Clock In"  type="time" value={form.clockIn}  onChange={handleClockInChange} />
-          <InputField label="Clock Out" type="time" value={form.clockOut} onChange={f('clockOut')} />
+        {/* One Clock In / Clock Out pair per shift session.
+             Each field has an ✕ button so the user can fully clear a time —
+             native <input type="time"> snaps to 12:00 when emptied via keyboard,
+             so we layer a clear button on top and store '' explicitly. */}
+        <div className="space-y-3">
+          {sessions.map((s, idx) => (
+            <div key={idx} className="grid grid-cols-2 gap-3">
+              {[['clockIn', s.clockIn, s.label ? `${s.label} Clock In` : 'Clock In'],
+                ['clockOut', s.clockOut, s.label ? `${s.label} Clock Out` : 'Clock Out']].map(([field, val, lbl]) => (
+                <div key={field}>
+                  <label className="label">{lbl}</label>
+                  <div className="relative flex items-center">
+                    <input
+                      type="time"
+                      value={val || ''}
+                      onChange={e => updatePunch(idx, field, e.target.value)}
+                      className="input pr-7 w-full"
+                    />
+                    {val && (
+                      <button
+                        type="button"
+                        onClick={() => updatePunch(idx, field, '')}
+                        className="absolute right-2 text-ink-300 hover:text-ink-600 text-xs leading-none"
+                        title="Clear"
+                      >✕</button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ))}
+          {sessions.length === 0 && (
+            <p className="text-[11px] text-ink-300">Select an employee to fill in their clock-in/out times.</p>
+          )}
         </div>
 
         <SelectField label="Status" value={form.status} onChange={f('status')}
@@ -310,7 +441,7 @@ function AttendanceModal({ open, onClose, onSave, employees, shifts, lateThresho
             { value: 'half-day', label: 'Half Day'  },
           ]}
         />
-        {assignedShift && form.clockIn && (
+        {assignedShift && sessions[0]?.clockIn && (
           <p className="text-[11px] text-ink-400">
             Status auto-calculated from shift start ({assignedShift.start}) ± {lateThreshold} min grace period.
           </p>

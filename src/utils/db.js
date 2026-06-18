@@ -88,6 +88,12 @@ export async function getSubscription(subscriptionId) {
     billing:           data.billing,
     enrolledEmployees,
     departments:       data.departments        ?? [],
+    // Tracks which department names were auto-added from typed employee input
+    // (vs. manually created on the Departments page). Stored inside `settings`
+    // so it doesn't require a database schema change. Defaults to "every
+    // existing department is manual" for older records that predate this field,
+    // which is the safe choice — it just means they won't be auto-pruned.
+    autoDepartments:   data.settings?.autoDepartments ?? [],
     shifts:            data.shifts             ?? [],
     attendanceRecords: (data.attendance_records ?? []).map(r => ({
       ...r,
@@ -117,7 +123,9 @@ export async function putSubscription(state) {
       shifts:             state.shifts             ?? [],
       attendance_records: state.attendanceRecords  ?? [],
       leave_requests:     state.leaveRequests      ?? [],
-      settings:           state.settings           ?? {},
+      // autoDepartments rides along inside settings (no dedicated column) so we
+      // can track which departments were auto-added from typed employee input.
+      settings:           { ...(state.settings ?? {}), autoDepartments: state.autoDepartments ?? [] },
       status:             state.status,
       trial_ends_at:      state.trialEndsAt        ?? null,
     });

@@ -2,7 +2,7 @@ import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { UserPlus, Pencil, Trash2, Eye, EyeOff, ToggleLeft, ToggleRight, RefreshCw, Wand2, PenLine, BarChart2, Clock, CheckCircle, XCircle, AlertTriangle, TrendingUp, ClipboardCopy, UserCheck, Link, Camera, Upload, X as XIcon } from 'lucide-react';
 import { useLocation } from 'react-router-dom';
 import { useSubscription } from '../context/SubscriptionContext';
-import { fmt } from '../utils/dateTime';
+import { fmt, computeWorkedMinutes } from '../utils/dateTime';
 import { Avatar, StatusBadge, SearchInput, SelectField, SectionHeader, EmptyState, Modal, InputField } from '../components/ui';
 import { useToast } from '../context/ToastContext';
 import { useAuth } from '../context/AuthContext';
@@ -1446,16 +1446,10 @@ function EmployeeAnalyticsModal({ open, onClose, employee, attendance, shifts })
       const s = r.status?.toLowerCase();
       if (s && counts[s] !== undefined) counts[s]++;
     });
-    const totalMinutes = empRecords.reduce((acc, r) => {
-      if (!r.clockIn || !r.clockOut) return acc;
-      const [ih, im] = r.clockIn.split(':').map(Number);
-      const [oh, om] = r.clockOut.split(':').map(Number);
-      let diff = (oh * 60 + om) - (ih * 60 + im);
-      if (diff < 0) diff += 24 * 60; // overnight
-      return acc + diff;
-    }, 0);
-    const avgHours = empRecords.filter(r => r.clockIn && r.clockOut).length
-      ? (totalMinutes / empRecords.filter(r => r.clockIn && r.clockOut).length / 60).toFixed(1)
+    const totalMinutes = empRecords.reduce((acc, r) => acc + computeWorkedMinutes(r), 0);
+    const workedCount = empRecords.filter(r => computeWorkedMinutes(r) > 0).length;
+    const avgHours = workedCount
+      ? (totalMinutes / workedCount / 60).toFixed(1)
       : '—';
     return { ...counts, total: empRecords.length, avgHours };
   }, [empRecords]);
@@ -1470,14 +1464,7 @@ function EmployeeAnalyticsModal({ open, onClose, employee, attendance, shifts })
       const label = d.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' });
       const rec = empRecords.find(r => r.date === dateStr);
       const status = rec?.status?.toLowerCase() || 'no-record';
-      const hours = (() => {
-        if (!rec?.clockIn || !rec?.clockOut) return 0;
-        const [ih, im] = rec.clockIn.split(':').map(Number);
-        const [oh, om] = rec.clockOut.split(':').map(Number);
-        let diff = (oh * 60 + om) - (ih * 60 + im);
-        if (diff < 0) diff += 24 * 60;
-        return +(diff / 60).toFixed(1);
-      })();
+      const hours = +(computeWorkedMinutes(rec) / 60).toFixed(1);
       days.push({ dateStr, label, status, hours, rec });
     }
     return days;

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Clock, Plus, Trash2, Pencil, Users, QrCode, Wifi, MapPin, X, Download } from 'lucide-react';
+import { Clock, Plus, Trash2, Pencil, Users, QrCode, Wifi, MapPin, X, Download, Layers } from 'lucide-react';
 import { useSubscription } from '../context/SubscriptionContext';
 import { SectionHeader, Modal, InputField, EmptyState } from '../components/ui';
 import { useToast } from '../context/ToastContext';
@@ -7,7 +7,51 @@ import PlanGate from '../components/PlanGate';
 
 const SHIFT_COLORS = ['#f59e0b','#4f6ef7','#10b981','#8b5cf6','#ef4444','#ec4899','#06b6d4'];
 
-const EMPTY_FORM = { name: '', start: '08:00', end: '17:00', clockInMode: 'remote', qrValidity: 'daily' };
+const EMPTY_FORM = {
+  name: '', start: '08:00', end: '17:00',
+  clockInMode: 'remote', qrValidity: 'daily',
+  clockType: 'standard', // 'standard' = 1 clock in/out · 'split' = multiple sessions per day
+  sessions: [],
+  departments: [], // department names this shift auto-assigns to
+};
+
+// Quick-fill templates for the most common split-shift setups, matching
+// typical Philippine company schedules (lunch-break split, or a third
+// evening block on top of that).
+const SESSION_TEMPLATES = {
+  2: [
+    { label: 'Morning',   start: '08:00', end: '12:00' },
+    { label: 'Afternoon', start: '13:00', end: '17:00' },
+  ],
+  3: [
+    { label: 'Morning',   start: '06:00', end: '10:00' },
+    { label: 'Afternoon', start: '11:00', end: '15:00' },
+    { label: 'Evening',   start: '16:00', end: '20:00' },
+  ],
+};
+
+/** Turn the form's raw sessions into a saved shift payload: assigns stable
+ *  ids and keeps top-level start/end in sync with the first/last session so
+ *  every other part of the app (QR payload, shift chips, status calc) that
+ *  reads shift.start/shift.end keeps working without any changes. */
+function buildShiftPayload(form) {
+  if ((form.clockType || 'standard') === 'split' && form.sessions?.length) {
+    const sessions = form.sessions.map((s, i) => ({
+      id: s.id ?? `s${i + 1}`,
+      label: s.label?.trim() || `Session ${i + 1}`,
+      start: s.start,
+      end: s.end,
+    }));
+    return {
+      ...form,
+      clockType: 'split',
+      sessions,
+      start: sessions[0].start,
+      end: sessions[sessions.length - 1].end,
+    };
+  }
+  return { ...form, clockType: 'standard', sessions: [] };
+}
 
 // ── Tiny pure-JS QR renderer (no external lib needed) ────────────────────────
 // Uses the free qrcode-generator approach via a <canvas>
@@ -153,15 +197,190 @@ function QRModal({ shift, open, onClose }) {
 }
 
 // ── Shift Form ────────────────────────────────────────────────────────────────
-function ShiftFormFields({ form, setForm }) {
+function ShiftFormFields({ form, setForm, departments = [], employees = [], allShifts = [], excludeShiftId }) {
   const f = k => v => setForm(p => ({ ...p, [k]: v }));
+  const clockType = form.clockType || 'standard';
+  const sessions  = form.sessions || [];
+  const selectedDepts = form.departments || [];
+
+  function setClockType(type) {
+    setForm(p => {
+      if (type === 'split' && (!p.sessions || p.sessions.length < 2)) {
+        return { ...p, clockType: type, sessions: SESSION_TEMPLATES[2].map(s => ({ ...s })) };
+      }
+      return { ...p, clockType: type };
+    });
+  }
+
+  function applyTemplate(count) {
+    setForm(p => ({ ...p, sessions: SESSION_TEMPLATES[count].map(s => ({ ...s })) }));
+  }
+
+  function updateSession(idx, key, value) {
+    setForm(p => {
+      const next = [...(p.sessions || [])];
+      next[idx] = { ...next[idx], [key]: value };
+      return { ...p, sessions: next };
+    });
+  }
+
+  function addSession() {
+    setForm(p => {
+      const list = p.sessions || [];
+      const last = list[list.length - 1];
+      return { ...p, sessions: [...list, { label: `Session ${list.length + 1}`, start: last?.end || '13:00', end: '17:00' }] };
+    });
+  }
+
+  function removeSession(idx) {
+    setForm(p => ({ ...p, sessions: (p.sessions || []).filter((_, i) => i !== idx) }));
+  }
+
+  function toggleDept(dept) {
+    setForm(p => {
+      const list = p.departments || [];
+      return { ...p, departments: list.includes(dept) ? list.filter(d => d !== dept) : [...list, dept] };
+    });
+  }
+
+  const affectedCount = selectedDepts.length
+    ? employees.filter(e => selectedDepts.includes(e.department)).length
+    : 0;
+
+  // Departments that are currently auto-assigned to a *different* shift —
+  // selecting them here will move them over, so the admin should know.
+  const conflicts = selectedDepts
+    .map(dept => ({ dept, owner: allShifts.find(s => s.id !== excludeShiftId && s.departments?.includes(dept)) }))
+    .filter(c => c.owner);
+
   return (
     <div className="space-y-4">
       <InputField label="Shift Name" value={form.name} onChange={f('name')} placeholder="e.g. Morning Shift" />
-      <div className="grid grid-cols-2 gap-3">
-        <InputField label="Start Time" type="time" value={form.start} onChange={f('start')} />
-        <InputField label="End Time"   type="time" value={form.end}   onChange={f('end')} />
+
+      {/* Department auto-assign */}
+      <div>
+        <p className="text-xs font-medium text-ink-600 mb-1">
+          Auto-assign to Departments <span className="text-ink-300 font-normal">(optional)</span>
+        </p>
+        <p className="text-[10px] text-ink-400 mb-2 leading-relaxed">
+          Every employee in the departments you pick is switched to this shift automatically — no need to edit each employee one by one.
+        </p>
+        {departments.length === 0 ? (
+          <p className="text-[11px] text-ink-300">No departments set up yet.</p>
+        ) : (
+          <div className="flex flex-wrap gap-1.5">
+            {departments.map(dept => {
+              const active = selectedDepts.includes(dept);
+              return (
+                <button
+                  key={dept}
+                  type="button"
+                  onClick={() => toggleDept(dept)}
+                  className={`px-2.5 py-1 rounded-full text-[11px] font-medium border transition-colors ${
+                    active ? 'border-brand-500 bg-brand-50 text-brand-600' : 'border-surface-200 text-ink-500 hover:border-surface-300'
+                  }`}
+                >
+                  {dept}
+                </button>
+              );
+            })}
+          </div>
+        )}
+        {selectedDepts.length > 0 && (
+          <div className="mt-2 space-y-1">
+            <p className="text-[10px] text-ink-400 leading-relaxed">
+              {affectedCount} employee{affectedCount !== 1 ? 's' : ''} will be switched to this shift right now, and new hires in {selectedDepts.length > 1 ? 'these departments' : 'this department'} will default to it too.
+            </p>
+            {conflicts.map(({ dept, owner }) => (
+              <p key={dept} className="text-[10px] text-amber-600 leading-relaxed">
+                “{dept}” is currently auto-assigned to “{owner.name}” — saving will move it here instead.
+              </p>
+            ))}
+          </div>
+        )}
       </div>
+
+      {/* Clock Type */}
+      <div>
+        <p className="text-xs font-medium text-ink-600 mb-2">Clock Type</p>
+        <div className="grid grid-cols-2 gap-2">
+          {[
+            { value: 'standard', icon: Clock,  label: 'Standard',    desc: '1 clock in + 1 clock out' },
+            { value: 'split',    icon: Layers, label: 'Split Shift', desc: 'Multiple in/out per day' },
+          ].map(opt => {
+            const Icon = opt.icon;
+            const active = clockType === opt.value;
+            return (
+              <button
+                key={opt.value}
+                type="button"
+                onClick={() => setClockType(opt.value)}
+                className={`flex items-start gap-2.5 p-3 rounded-xl border-2 text-left transition-all ${
+                  active
+                    ? 'border-brand-500 bg-brand-50'
+                    : 'border-surface-200 bg-white hover:border-surface-300'
+                }`}
+              >
+                <Icon size={15} className={active ? 'text-brand-500 mt-0.5' : 'text-ink-300 mt-0.5'} />
+                <div>
+                  <p className={`text-xs font-semibold ${active ? 'text-brand-600' : 'text-ink-700'}`}>{opt.label}</p>
+                  <p className="text-[10px] text-ink-400 mt-0.5">{opt.desc}</p>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {clockType === 'standard' ? (
+        <div className="grid grid-cols-2 gap-3">
+          <InputField label="Start Time" type="time" value={form.start} onChange={f('start')} />
+          <InputField label="End Time"   type="time" value={form.end}   onChange={f('end')} />
+        </div>
+      ) : (
+        <div>
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-xs font-medium text-ink-600">
+              Sessions <span className="text-ink-300 font-normal">({sessions.length * 2} punches/day)</span>
+            </p>
+            <div className="flex items-center gap-1.5">
+              <button type="button" onClick={() => applyTemplate(2)} className="text-[10px] font-medium text-brand-500 hover:underline">2 sessions</button>
+              <span className="text-ink-200">·</span>
+              <button type="button" onClick={() => applyTemplate(3)} className="text-[10px] font-medium text-brand-500 hover:underline">3 sessions</button>
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            {sessions.map((s, idx) => (
+              <div key={idx} className="flex items-center gap-1.5 p-2 rounded-lg border border-surface-200 bg-surface-50">
+                <input
+                  type="text"
+                  value={s.label}
+                  onChange={e => updateSession(idx, 'label', e.target.value)}
+                  placeholder={`Session ${idx + 1}`}
+                  className="input !py-1.5 !text-xs flex-1 min-w-0"
+                />
+                <input type="time" value={s.start} onChange={e => updateSession(idx, 'start', e.target.value)} className="input !py-1.5 !text-xs w-[104px] shrink-0" />
+                <span className="text-ink-300 text-xs shrink-0">–</span>
+                <input type="time" value={s.end} onChange={e => updateSession(idx, 'end', e.target.value)} className="input !py-1.5 !text-xs w-[104px] shrink-0" />
+                {sessions.length > 1 && (
+                  <button type="button" onClick={() => removeSession(idx)} className="p-1 rounded-md text-ink-300 hover:text-danger-500 hover:bg-danger-50 transition-colors shrink-0">
+                    <X size={13} />
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+
+          <button type="button" onClick={addSession} className="flex items-center gap-1.5 text-[11px] font-medium text-brand-500 hover:text-brand-600 mt-2">
+            <Plus size={12} /> Add session
+          </button>
+
+          <p className="text-[10px] text-ink-400 mt-2 leading-relaxed">
+            Employees clock in and out once per session — e.g. clock out for lunch, then clock back in for the afternoon. Each session is tracked and totalled separately on the Attendance page.
+          </p>
+        </div>
+      )}
 
       {/* Clock-in Mode */}
       <div>
@@ -240,9 +459,10 @@ function ShiftFormFields({ form, setForm }) {
 // ── Main Content ──────────────────────────────────────────────────────────────
 function ShiftsContent() {
   const toast = useToast();
-  const { subscription, addShift, removeShift, updateShift } = useSubscription();
-  const shifts    = subscription?.shifts || [];
-  const employees = subscription?.enrolledEmployees || [];
+  const { subscription, addShift, removeShift, updateShift, updateEmployee } = useSubscription();
+  const shifts      = subscription?.shifts || [];
+  const employees   = subscription?.enrolledEmployees || [];
+  const departments = subscription?.departments || [];
 
   const [addModal,   setAddModal]   = useState(false);
   const [editTarget, setEditTarget] = useState(null);
@@ -262,13 +482,29 @@ function ShiftsContent() {
       end: shift.end,
       clockInMode: shift.clockInMode || 'remote',
       qrValidity: shift.qrValidity || 'daily',
+      clockType: shift.clockType || 'standard',
+      sessions: shift.sessions?.length ? shift.sessions.map(s => ({ ...s })) : [],
+      departments: shift.departments ? [...shift.departments] : [],
     });
     setEditTarget(shift);
   }
 
   function handleAdd() {
     if (!form.name.trim()) return;
-    addShift({ ...form, color: SHIFT_COLORS[shifts.length % SHIFT_COLORS.length] });
+    const payload = buildShiftPayload(form);
+    // addShift sets id = Date.now() internally; capture the same timestamp
+    const newShiftId = Date.now();
+    addShift({ ...payload, id: newShiftId, color: SHIFT_COLORS[shifts.length % SHIFT_COLORS.length] });
+    // Bulk-reassign employees in the selected departments to this new shift.
+    // Use a tiny delay so the shift is committed to state before employee updates run.
+    if (form.departments?.length) {
+      const depts = form.departments;
+      setTimeout(() => {
+        employees
+          .filter(e => depts.includes(e.department))
+          .forEach(e => updateEmployee(e.id, { shiftId: newShiftId }));
+      }, 0);
+    }
     toast(`Shift "${form.name}" added`, 'success');
     setForm(EMPTY_FORM);
     setAddModal(false);
@@ -276,7 +512,23 @@ function ShiftsContent() {
 
   function handleEdit() {
     if (!form.name.trim()) return;
-    updateShift(editTarget.id, { name: form.name, start: form.start, end: form.end, clockInMode: form.clockInMode, qrValidity: form.qrValidity });
+    const payload = buildShiftPayload(form);
+    updateShift(editTarget.id, {
+      name: form.name,
+      start: payload.start,
+      end: payload.end,
+      clockInMode: form.clockInMode,
+      qrValidity: form.qrValidity,
+      clockType: payload.clockType,
+      sessions: payload.sessions,
+      departments: form.departments || [],
+    });
+    // Bulk-reassign employees in the selected departments to this shift
+    if (form.departments?.length) {
+      employees
+        .filter(e => form.departments.includes(e.department))
+        .forEach(e => updateEmployee(e.id, { shiftId: editTarget.id }));
+    }
     toast(`Shift "${form.name}" updated`, 'success');
     setEditTarget(null);
   }
@@ -327,7 +579,7 @@ function ShiftsContent() {
                   <div className="flex-1 min-w-0">
                     <p className="text-sm font-semibold text-ink-800 truncate">{shift.name}</p>
                     <p className="text-xs text-ink-400">{shift.start} – {shift.end}</p>
-                    <div className="flex items-center gap-2 mt-1">
+                    <div className="flex items-center gap-2 mt-1 flex-wrap">
                       <div className="flex items-center gap-1">
                         <Users size={11} className="text-ink-300" />
                         <span className="text-[11px] text-ink-400">{count} employee{count !== 1 ? 's' : ''}</span>
@@ -339,7 +591,27 @@ function ShiftsContent() {
                           {mode === 'onsite' ? 'Onsite' : 'Remote'}
                         </span>
                       </div>
+                      {shift.clockType === 'split' && shift.sessions?.length > 0 && (
+                        <>
+                          <span className="text-ink-200">·</span>
+                          <div className="flex items-center gap-1">
+                            <Layers size={11} className="text-violet-400" />
+                            <span className="text-[11px] font-medium text-violet-500">
+                              {shift.sessions.length * 2} punches/day
+                            </span>
+                          </div>
+                        </>
+                      )}
                     </div>
+                    {shift.clockType === 'split' && shift.sessions?.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5 mt-1.5">
+                        {shift.sessions.map((s, i) => (
+                          <span key={i} className="text-[10px] px-1.5 py-0.5 rounded-md bg-surface-100 text-ink-500">
+                            {s.label}: {s.start}–{s.end}
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </div>
                   <div className="flex items-center gap-1">
                     <button onClick={() => openEdit(shift)} className="p-1.5 rounded-lg text-ink-300 hover:text-brand-500 hover:bg-brand-50 transition-colors" title="Edit shift">
@@ -370,14 +642,25 @@ function ShiftsContent() {
       <Modal open={addModal} onClose={() => setAddModal(false)} title="Add Shift" width="max-w-sm"
         footer={modalFooter(handleAdd, 'Add Shift')}
       >
-        <ShiftFormFields form={form} setForm={setForm} />
+        <ShiftFormFields
+          form={form} setForm={setForm}
+          departments={departments}
+          employees={employees}
+          allShifts={shifts}
+        />
       </Modal>
 
       {/* Edit modal */}
       <Modal open={!!editTarget} onClose={() => setEditTarget(null)} title="Edit Shift" width="max-w-sm"
         footer={modalFooter(handleEdit, 'Save Changes')}
       >
-        <ShiftFormFields form={form} setForm={setForm} />
+        <ShiftFormFields
+          form={form} setForm={setForm}
+          departments={departments}
+          employees={employees}
+          allShifts={shifts}
+          excludeShiftId={editTarget?.id}
+        />
       </Modal>
 
       {/* QR Code modal */}

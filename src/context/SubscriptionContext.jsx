@@ -45,6 +45,34 @@ const AVATAR_COLORS = [
   '#ec4899','#06b6d4','#84cc16','#f97316','#14b8a6',
 ];
 
+// Keep the departments list in sync with what employees actually have typed in.
+// - Any non-empty department typed on an employee that isn't tracked yet gets added,
+//   and is remembered in `autoDepartments` so we know it was auto-created (not manual).
+// - An auto-created department with zero employees in it gets pruned automatically
+//   to free up space. Departments the user manually added on the Departments page
+//   are left alone even at 0 employees, so pre-creating a department ahead of an
+//   upcoming hire still works.
+function syncDepartments(departments, autoDepartments, employees) {
+  const list = departments || [];
+  const autoSet = new Set(autoDepartments || []);
+  const used = new Set(
+    (employees || [])
+      .map(e => (e.department || '').trim())
+      .filter(Boolean)
+  );
+
+  // Any typed department not already tracked is new — add it and mark it as auto-created.
+  const newNames = [...used].filter(name => !list.includes(name));
+
+  // Only prune departments that were auto-created AND now have zero employees.
+  const pruned = list.filter(name => used.has(name) || !autoSet.has(name));
+
+  const nextDepartments = [...pruned, ...newNames];
+  const nextAuto = [...autoSet, ...newNames].filter(name => nextDepartments.includes(name));
+
+  return { departments: nextDepartments, autoDepartments: nextAuto };
+}
+
 // Helper: set both React state AND the ref in one call
 function useStateRef(initial) {
   const [state, setStateRaw] = useState(initial);
@@ -132,7 +160,13 @@ export function SubscriptionProvider({ children }) {
         ? { ...billing, nextBillingDate: new Date(Date.now() + 30*24*60*60*1000).toISOString() }
         : null,
       enrolledEmployees: [],
-      departments: ['Engineering','Human Resources','Finance','Operations','Marketing','Sales','Customer Support'],
+      // Starts empty — departments are now auto-added the moment someone types
+      // a new one on an employee, and auto-removed the moment they're empty.
+      departments: [],
+      // Tracks which department names were auto-added from typed employee input
+      // (as opposed to manually created on the Departments page), so only those
+      // get auto-pruned once nobody is left in them.
+      autoDepartments: [],
       shifts: [
         { id: 1, name: 'Morning Shift',   start: '06:00', end: '14:00', color: '#f59e0b' },
         { id: 2, name: 'Day Shift',       start: '08:00', end: '17:00', color: '#4f6ef7' },
@@ -173,21 +207,32 @@ export function SubscriptionProvider({ children }) {
       if (prev.enrolledEmployees.length >= plan.maxSeats) {
         throw new Error(`Your ${plan.name} plan supports up to ${plan.maxSeats} employees. Please upgrade.`);
       }
+      // Resolve clockInMode from the assigned shift so the mobile app can read
+      // it directly from the employee object without a second lookup.
+      const assignedShift = employee.shiftId
+        ? prev.shifts.find(s => String(s.id) === String(employee.shiftId))
+        : null;
+      const clockInMode = assignedShift?.clockInMode ?? 'remote';
+      const nextEmployees = [
+        ...prev.enrolledEmployees,
+        {
+          ...employee,
+          id: empId,
+          employeeCode: employee.employeeCode?.trim()
+            ? employee.employeeCode.trim().toUpperCase()
+            : `ERJ-${rand}${String(empId).slice(-3)}`,
+          status: 'active',
+          accountEmployeeId: String(empId),
+          avatarColor: AVATAR_COLORS[prev.enrolledEmployees.length % AVATAR_COLORS.length],
+          clockInMode,
+        },
+      ];
       return {
         ...prev,
-        enrolledEmployees: [
-          ...prev.enrolledEmployees,
-          {
-            ...employee,
-            id: empId,
-            employeeCode: employee.employeeCode?.trim()
-              ? employee.employeeCode.trim().toUpperCase()
-              : `ERJ-${rand}${String(empId).slice(-3)}`,
-            status: 'active',
-            accountEmployeeId: String(empId),
-            avatarColor: AVATAR_COLORS[prev.enrolledEmployees.length % AVATAR_COLORS.length],
-          },
-        ],
+        enrolledEmployees: nextEmployees,
+        // Auto-add a freshly typed department (e.g. "Department of Agriculture")
+        // and prune any auto-created department that's now unused.
+        ...syncDepartments(prev.departments, prev.autoDepartments, nextEmployees),
       };
     });
     // Create mobile login account if credentials provided
@@ -208,13 +253,37 @@ export function SubscriptionProvider({ children }) {
     }
   }, [update]);
 
-  const removeEmployee     = useCallback((id)      => update(prev => ({ ...prev, enrolledEmployees: prev.enrolledEmployees.filter(e => e.id !== id) })), [update]);
+  const removeEmployee = useCallback((id) => update(prev => {
+    const nextEmployees = prev.enrolledEmployees.filter(e => e.id !== id);
+    return {
+      ...prev,
+      enrolledEmployees: nextEmployees,
+      // Removing an employee may leave an auto-created department with nobody
+      // in it — free it up. Manually created departments are left alone.
+      ...syncDepartments(prev.departments, prev.autoDepartments, nextEmployees),
+    };
+  }), [update]);
   const updateEmployee = useCallback(async (id, upd) => {
     // 1. Update the enrolledEmployees JSON in the subscription (local + Supabase)
-    update(prev => ({
-      ...prev,
-      enrolledEmployees: prev.enrolledEmployees.map(e => e.id === id ? { ...e, ...upd } : e),
-    }));
+    //    If shiftId is changing, also resolve and store clockInMode from the new
+    //    shift so the mobile app can read it directly without a second lookup.
+    update(prev => {
+      let resolvedUpd = { ...upd };
+      if (upd.shiftId !== undefined) {
+        const assignedShift = upd.shiftId
+          ? prev.shifts.find(s => String(s.id) === String(upd.shiftId))
+          : null;
+        resolvedUpd.clockInMode = assignedShift?.clockInMode ?? 'remote';
+      }
+      const nextEmployees = prev.enrolledEmployees.map(e => e.id === id ? { ...e, ...resolvedUpd } : e);
+      return {
+        ...prev,
+        enrolledEmployees: nextEmployees,
+        // If the department changed, add any newly typed department and
+        // prune whichever auto-created department is now empty.
+        ...syncDepartments(prev.departments, prev.autoDepartments, nextEmployees),
+      };
+    });
 
     // 2. Sync the accounts table if any account-related fields changed
     const accountFields = ['username', 'password', 'name', 'email'];
@@ -401,9 +470,8 @@ export function SubscriptionProvider({ children }) {
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     const rand  = Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
     const { id: _pid, subscriptionId: _sid, submittedAt: _s, notes: _n, ...rest } = pending;
-    update(prev => ({
-      ...prev,
-      enrolledEmployees: [
+    update(prev => {
+      const nextEmployees = [
         ...prev.enrolledEmployees,
         {
           ...rest,
@@ -415,8 +483,14 @@ export function SubscriptionProvider({ children }) {
           accountEmployeeId: String(empId),
           avatarColor: AVATAR_COLORS[prev.enrolledEmployees.length % AVATAR_COLORS.length],
         },
-      ],
-    }));
+      ];
+      return {
+        ...prev,
+        enrolledEmployees: nextEmployees,
+        // Auto-add the department the employee typed during self-registration.
+        ...syncDepartments(prev.departments, prev.autoDepartments, nextEmployees),
+      };
+    });
     await deletePendingRegistration(pendingId);
     setPendingEmployees(prev => prev.filter(p => p.id !== pendingId));
     // Create mobile login account if credentials provided
@@ -443,13 +517,32 @@ export function SubscriptionProvider({ children }) {
   }, []);
 
   // ── Departments ───────────────────────────────────────────────────────────────
+  // Manually created departments are never marked "auto" — they survive at 0 employees
+  // until someone removes them here on purpose.
   const addDepartment    = useCallback((name) => update(prev => ({ ...prev, departments: [...prev.departments, name] })), [update]);
-  const removeDepartment = useCallback((name) => update(prev => ({ ...prev, departments: prev.departments.filter(d => d !== name) })), [update]);
+  const removeDepartment = useCallback((name) => update(prev => ({
+    ...prev,
+    departments: prev.departments.filter(d => d !== name),
+    autoDepartments: (prev.autoDepartments || []).filter(d => d !== name),
+  })), [update]);
 
   // ── Shifts ────────────────────────────────────────────────────────────────────
-  const addShift    = useCallback((shift)   => update(prev => ({ ...prev, shifts: [...prev.shifts, { ...shift, id: Date.now() }] })), [update]);
+  const addShift    = useCallback((shift)   => update(prev => ({ ...prev, shifts: [...prev.shifts, { id: Date.now(), ...shift }] })), [update]);
   const removeShift = useCallback((shiftId) => update(prev => ({ ...prev, shifts: prev.shifts.filter(s => s.id !== shiftId) })), [update]);
-  const updateShift = useCallback((shiftId, upd) => update(prev => ({ ...prev, shifts: prev.shifts.map(s => s.id === shiftId ? { ...s, ...upd } : s) })), [update]);
+  const updateShift = useCallback((shiftId, upd) => update(prev => {
+    const updatedShifts = prev.shifts.map(s => s.id === shiftId ? { ...s, ...upd } : s);
+    // If clockInMode changed, propagate it to all employees assigned to this shift
+    // so the mobile app always reads an up-to-date value from the employee object.
+    let updatedEmployees = prev.enrolledEmployees;
+    if (upd.clockInMode !== undefined) {
+      updatedEmployees = prev.enrolledEmployees.map(e =>
+        String(e.shiftId) === String(shiftId)
+          ? { ...e, clockInMode: upd.clockInMode }
+          : e
+      );
+    }
+    return { ...prev, shifts: updatedShifts, enrolledEmployees: updatedEmployees };
+  }), [update]);
 
   // ── Derived ───────────────────────────────────────────────────────────────────
   const currentPlan    = subscription ? PLANS.find(p => p.id === subscription.planId) : null;

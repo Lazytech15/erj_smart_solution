@@ -44,6 +44,50 @@ export function getStatus(record) {
   return 'present';
 }
 
+// ── Multi-session clock helpers ──────────────────────────────────────────────
+// Supports shifts with more than one clock-in/clock-out pair per day (e.g. a
+// split shift: morning in/out, afternoon in/out, or even an added evening
+// in/out). A "session" is one { label, start, end } block on a shift, and one
+// { sessionId, label, clockIn, clockOut } punch on an attendance record.
+
+/** Minutes between two "HH:mm" strings. Treats a smaller end-time as crossing midnight. */
+export function hhmmDiffMinutes(clockIn, clockOut) {
+  if (!clockIn || !clockOut) return 0;
+  const [ih, im] = clockIn.split(':').map(Number);
+  const [oh, om] = clockOut.split(':').map(Number);
+  let diff = (oh * 60 + om) - (ih * 60 + im);
+  if (diff < 0) diff += 24 * 60;
+  return diff;
+}
+
+/** Total worked minutes for an attendance record. Sums every clocked session
+ *  (so lunch-break gaps on split shifts aren't counted as worked time).
+ *  Falls back to the legacy single clockIn/clockOut pair when no session
+ *  breakdown is present, so old records keep working unchanged. */
+export function computeWorkedMinutes(record) {
+  if (record?.sessions?.length) {
+    return record.sessions.reduce((acc, s) => acc + hhmmDiffMinutes(s.clockIn, s.clockOut), 0);
+  }
+  return hhmmDiffMinutes(record?.clockIn, record?.clockOut);
+}
+
+/** Normalized list of { label, clockIn, clockOut } punches for display,
+ *  whether the record uses the new multi-session shape or the legacy pair. */
+export function getSessionPunches(record) {
+  if (record?.sessions?.length) return record.sessions;
+  if (record?.clockIn || record?.clockOut) return [{ label: '', clockIn: record?.clockIn || '', clockOut: record?.clockOut || '' }];
+  return [];
+}
+
+/** The session blocks an employee is expected to clock against for a shift.
+ *  'split' shifts use their configured sessions array; everything else
+ *  (including no shift at all) is treated as one plain session. */
+export function getShiftSessions(shift) {
+  if (!shift) return [{ id: 'full', label: '', start: '', end: '' }];
+  if (shift.clockType === 'split' && shift.sessions?.length) return shift.sessions;
+  return [{ id: 'full', label: '', start: shift.start, end: shift.end }];
+}
+
 export const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 export const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
 
