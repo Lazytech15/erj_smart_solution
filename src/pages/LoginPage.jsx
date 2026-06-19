@@ -1,44 +1,60 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Eye, EyeOff, ArrowRight, Clock, FileText, Users, Shield } from 'lucide-react';
+import { Eye, EyeOff, ArrowRight, Clock, FileText, Users, Shield, AlertTriangle } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { Spinner } from '../components/ui';
 import TransitionLoadingScreen from '../components/TransitionLoadingScreen';
 import { getSubscription } from '../utils/db';
+import { ABAC_RESULT } from '../utils/abac';
 
 const FEATURES = [
-  { icon: Clock, label: 'Real-time attendance tracking' },
+  { icon: Clock,  label: 'Real-time attendance tracking' },
   { icon: FileText, label: 'Automated payroll reports' },
-  { icon: Users, label: 'Biometric device integration' },
-  { icon: Shield, label: 'Role-based access control' },
+  { icon: Users,  label: 'Biometric device integration' },
+  { icon: Shield, label: 'Attribute-based access control' },
 ];
+
+/** Human-readable labels for ABAC flag codes */
+function describeFlagCode(code) {
+  if (code.startsWith('off_hours_login'))    return 'Login outside normal business hours';
+  if (code.startsWith('country_change'))     return `Login from a new country (${code.split(':')[1]})`;
+  if (code.startsWith('ip_change'))          return 'Login from a new IP address';
+  if (code === 'new_device')                 return 'Login from an unrecognised device';
+  if (code === 'suspicious_hour_employee')   return 'Login between 1:00 AM – 4:00 AM';
+  if (code === 'weekend_privileged_login')   return 'Weekend login on a privileged account';
+  return code;
+}
 
 export default function LoginPage() {
   const { login, commitLogin } = useAuth();
-  const toast = useToast();
+  const toast   = useToast();
   const navigate = useNavigate();
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [showPw, setShowPw] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
+
+  const [email,       setEmail]       = useState('');
+  const [password,    setPassword]    = useState('');
+  const [showPw,      setShowPw]      = useState(false);
+  const [loading,     setLoading]     = useState(false);
+  const [error,       setError]       = useState('');
   const [transitioning, setTransitioning] = useState(false);
-  // Holds the in-flight subscription fetch so TransitionLoadingScreen can
-  // watch it and pace the progress bar to real network timing.
   const [subscriptionPromise, setSubscriptionPromise] = useState(null);
+
+  /** Stores ABAC flags so we can show a notice after login completes */
+  const [securityFlags, setSecurityFlags] = useState([]);
 
   async function handleSubmit(e) {
     e.preventDefault();
     setError('');
     setLoading(true);
     try {
-      const user = await login(email, password);
+      const { user, abac } = await login(email, password);
       toast('Welcome back!', 'success');
 
-      // Kick off the subscription fetch immediately — don't await it here.
-      // Pass the promise to TransitionLoadingScreen so the progress bar
-      // pauses at ~70% and waits for this to resolve before finishing.
+      // Stash flags so we can show the banner after commitLogin
+      if (abac?.flags?.length) {
+        setSecurityFlags(abac.flags);
+      }
+
       const subPromise = user?.subscriptionId
         ? getSubscription(user.subscriptionId)
         : Promise.resolve(null);
@@ -57,10 +73,13 @@ export default function LoginPage() {
         label="Signing you in…"
         promise={subscriptionPromise}
         onComplete={() => {
-          // By the time onComplete fires, the subscription fetch is done.
-          // commitLogin sets user state — SubscriptionContext will re-run
-          // its effect but the data is already cached/fetched so it's instant.
           commitLogin();
+
+          // Show a non-blocking toast for each security flag
+          securityFlags.forEach(code => {
+            toast(`Security notice: ${describeFlagCode(code)}`, 'warning');
+          });
+
           navigate('/app/dashboard');
         }}
       />
@@ -123,7 +142,7 @@ export default function LoginPage() {
           >
             {[
               { v: '₱150/mo', l: 'per employee' },
-              { v: '14-day', l: 'free trial' },
+              { v: '14-day',  l: 'free trial' },
               { v: '3 Plans', l: 'to choose from' },
             ].map(({ v, l }) => (
               <div key={l}>
@@ -163,7 +182,12 @@ export default function LoginPage() {
                 className="flex items-start gap-2.5 p-3.5 rounded-xl mb-5 text-sm"
                 style={{ background: '#fef2f2', border: '1px solid #fecaca', color: '#991b1b' }}
               >
-                <span className="mt-0.5 shrink-0">⚠</span>
+                {/* Show shield icon for ABAC policy blocks, warning icon otherwise */}
+                {error.includes('1:00 AM') || error.includes('hours') || error.includes('country') || error.includes('device') ? (
+                  <Shield size={15} className="mt-0.5 shrink-0" />
+                ) : (
+                  <AlertTriangle size={15} className="mt-0.5 shrink-0" />
+                )}
                 {error}
               </div>
             )}
