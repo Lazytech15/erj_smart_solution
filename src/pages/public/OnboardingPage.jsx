@@ -7,6 +7,7 @@ import {
 import { useSubscription } from '../../context/SubscriptionContext';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { getSubscription } from '../../utils/db';
 import { InputField, Avatar, Spinner } from '../../components/ui';
 import LoadingScreen from '../../components/LoadingScreen';
 import TransitionLoadingScreen from '../../components/TransitionLoadingScreen';
@@ -298,9 +299,21 @@ export default function OnboardingPage() {
   } = useSubscription();
   const [saving, setSaving] = useState(false);
   const [transitioning, setTransitioning] = useState(false);
+  const [readyPromise, setReadyPromise] = useState(null);
   const [expanded, setExpanded] = useState(null);
   const [csvErrors, setCsvErrors] = useState([]);
   const [csvImporting, setCsvImporting] = useState(false);
+
+  // Commit the pending login from registerCompanyAdmin() as soon as we land
+  // here. Without this, `user` (and therefore `user.subscriptionId`) stays
+  // unset for the entire onboarding page, since the SIGNED_IN listener in
+  // AuthContext intentionally skips auto-setting `user` whenever a pending
+  // login is queued (to avoid racing this exact flow). Calling commitLogin()
+  // a second time at "Finish setup" is a harmless no-op since the ref is
+  // cleared after the first call.
+  useEffect(() => {
+    commitLogin();
+  }, [commitLogin]);
 
   useEffect(() => {
     if (!loading && !subscription) navigate('/pricing');
@@ -313,9 +326,9 @@ export default function OnboardingPage() {
   const departments = subscription.departments || [];
   const existingCodes = enrolled.map(e => e.employeeCode);
 
-  function handleAdd(employee) {
+  async function handleAdd(employee) {
     try {
-      enrollEmployee(employee);
+      await enrollEmployee(employee);
       toast(`${[employee.firstName, employee.middleName, employee.lastName, employee.suffix].filter(Boolean).join(' ')} enrolled · ${employee.employeeCode}`, 'success');
     } catch (err) {
       toast(err.message, 'error');
@@ -334,7 +347,7 @@ export default function OnboardingPage() {
     setCsvImporting(true);
 
     const reader = new FileReader();
-    reader.onload = (ev) => {
+    reader.onload = async (ev) => {
       const { employees, errors } = parseCSV(ev.target.result);
       setCsvImporting(false);
 
@@ -345,13 +358,13 @@ export default function OnboardingPage() {
 
       let added = 0;
       let skipped = 0;
-      employees.forEach(emp => {
+      for (const emp of employees) {
         // Deduplicate by email or code
         const duplicate = enrolled.find(e => e.email === emp.email || (emp.employeeCode && e.employeeCode === emp.employeeCode));
-        if (duplicate) { skipped++; return; }
-        if (seatsAvailable - added <= 0) { skipped++; return; }
-        try { enrollEmployee(emp); added++; } catch { skipped++; }
-      });
+        if (duplicate) { skipped++; continue; }
+        if (seatsAvailable - added <= 0) { skipped++; continue; }
+        try { await enrollEmployee(emp); added++; } catch { skipped++; }
+      }
 
       toast(`${added} employee${added !== 1 ? 's' : ''} imported${skipped > 0 ? ` · ${skipped} skipped` : ''}`, added > 0 ? 'success' : 'warning');
     };
@@ -361,9 +374,15 @@ export default function OnboardingPage() {
 
   async function handleFinish() {
     setSaving(true);
-    await new Promise(r => setTimeout(r, 600));
+    // Confirm the subscription row really exists in Supabase before we ever
+    // navigate to the dashboard. Without this, ProtectedRoute's
+    // getSubscription() call could race the original subscribe() write and
+    // hit PGRST116 ("0 rows"), leaving the app stuck in a loading loop —
+    // which is the exact bug this fixes.
+    const confirmReady = getSubscription(subscription.subscriptionId);
     setSaving(false);
     toast(`Workspace ready! ${enrolled.length > 0 ? enrolled.length + ' employees enrolled. ' : ''}Taking you to your dashboard.`, 'success');
+    setReadyPromise(confirmReady);
     setTransitioning(true);
   }
 
@@ -371,6 +390,7 @@ export default function OnboardingPage() {
     return (
       <TransitionLoadingScreen
         label="Setting up your dashboard…"
+        promise={readyPromise}
         onComplete={() => { commitLogin(); navigate('/app/dashboard'); }}
       />
     );

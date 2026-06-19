@@ -1,5 +1,5 @@
-import { createContext, useContext, useState, useCallback, useRef } from 'react';
-import { getAccount, putAccount } from '../utils/db';
+import { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
+import { supabase } from '../utils/supabase';
 import { cacheClear } from '../utils/cache';
 import {
   evaluateABACPolicy,
@@ -10,84 +10,198 @@ import {
 
 const AuthContext = createContext(null);
 
-const USER_KEY = 'attms_user';
-
-function loadSession() {
-  try { return JSON.parse(localStorage.getItem(USER_KEY)); } catch { return null; }
+/**
+ * Maps a Supabase Auth user + profile row → the app's `user` shape.
+ * Profile row comes from the `accounts` table and carries role, name,
+ * employeeId, subscriptionId — things Supabase Auth doesn't store natively.
+ */
+function buildUser(authUser, profile) {
+  return {
+    id:             authUser.id,           // supabase auth UUID
+    email:          authUser.email,
+    role:           profile?.role            ?? 'employee',
+    name:           profile?.name            ?? authUser.email,
+    employeeId:     profile?.employee_id     ?? null,
+    subscriptionId: profile?.subscription_id ?? null,
+    createdAt:      authUser.created_at,
+  };
 }
 
 export function AuthProvider({ children }) {
-  const [user, setUser] = useState(() => loadSession());
+  const [user, setUser]       = useState(undefined); // undefined = "not yet resolved"
+  const [authReady, setAuthReady] = useState(false);
 
-  /**
-   * pendingUserRef holds the validated+ABAC-checked user waiting for the
-   * transition animation to finish before being committed.
-   */
   const pendingUserRef = useRef(null);
-
-  /**
-   * pendingAbacRef holds the ABAC evaluation result so LoginPage can
-   * decide whether to show a security flag notice after transition.
-   */
   const pendingAbacRef = useRef(null);
 
-  const registerCompanyAdmin = useCallback(async ({ adminName, adminEmail, password, subscriptionId }) => {
-    const admin = {
-      email: adminEmail,
-      password,
-      role: 'admin',
-      name: adminName,
-      id: `admin_${Date.now()}`,
-      employeeId: null,
-      subscriptionId,
+  // ── Bootstrap: restore session on mount ────────────────────────────────────
+  useEffect(() => {
+    let mounted = true;
+
+    async function restoreSession() {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session?.user && mounted) {
+        const profile = await fetchProfile(session.user.id);
+        setUser(buildUser(session.user, profile));
+      } else if (mounted) {
+        setUser(null);
+      }
+      if (mounted) setAuthReady(true);
+    }
+
+    restoreSession();
+
+    // Listen for future auth state changes (token refresh, sign-out, etc.)
+    // SIGNED_IN is intentionally excluded here: both login() and registerCompanyAdmin()
+    // call signInWithPassword/signUp which fire SIGNED_IN. We let those callers
+    // manage state themselves (via pendingUserRef / direct setUser) to avoid races.
+    // TOKEN_REFRESHED handles silent session renewal; INITIAL_SESSION handles restores
+    // on hard reload (supplementing the getSession() call above for edge cases).
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (!mounted) return;
+      if (event === 'SIGNED_OUT' || !session?.user) {
+        setUser(null);
+        setAuthReady(true);
+      } else if (event === 'TOKEN_REFRESHED') {
+        // Silently refresh the user object when the JWT is renewed
+        const profile = await fetchProfile(session.user.id);
+        setUser(buildUser(session.user, profile));
+      } else if (event === 'SIGNED_IN') {
+        // Only auto-set user from onAuthStateChange on SIGNED_IN if no
+        // pending login() flow is in progress (i.e. not going through the
+        // ABAC + TransitionLoadingScreen path).
+        if (!pendingUserRef.current) {
+          const profile = await fetchProfile(session.user.id);
+          setUser(buildUser(session.user, profile));
+          setAuthReady(true);
+        }
+      }
+    });
+
+    return () => {
+      mounted = false;
+      subscription.unsubscribe();
     };
-    await putAccount(admin);
-    return admin;
   }, []);
 
+  // ── Profile helper ──────────────────────────────────────────────────────────
+  async function fetchProfile(authUid) {
+    const { data } = await supabase
+      .from('accounts')
+      .select('role, name, employee_id, subscription_id')
+      .eq('auth_uid', authUid)
+      .maybeSingle();
+    return data ?? null;
+  }
+
+  // ── registerCompanyAdmin ────────────────────────────────────────────────────
   /**
-   * login()
-   *
-   * 1. Verifies credentials against Supabase.
-   * 2. Runs the ABAC policy engine (time, device, IP/location).
-   * 3. On DENY  → throws an error (login rejected).
-   * 4. On ALLOW/FLAG → stores user + abac result in refs for commitLogin().
-   *
-   * Does NOT set user state yet — call commitLogin() from the transition screen.
+   * Called during onboarding/signup.
+   * 1. Creates the Supabase Auth user (email + password).
+   * 2. Inserts a profile row in `accounts` linking auth_uid → role/name/subscription.
+   */
+  const registerCompanyAdmin = useCallback(async ({ adminName, adminEmail, password, subscriptionId }) => {
+    // 1. Create the Supabase Auth user.
+    //    signUp() returns the user immediately even when email confirmation is
+    //    enabled, but the session will be null until confirmed. We handle both
+    //    cases so this works regardless of your Supabase email settings.
+    const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
+      email:    adminEmail,
+      password: password,
+      options: { data: { name: adminName } },
+    });
+    if (signUpError) throw new Error(signUpError.message);
+
+    const authUid = signUpData.user?.id;
+    if (!authUid) throw new Error('Sign-up succeeded but no user ID was returned.');
+
+    // 2. Insert profile row — authUid is always available even before confirmation.
+    const { error: profileError } = await supabase.from('accounts').insert({
+      auth_uid:        authUid,
+      email:           adminEmail,
+      role:            'admin',
+      name:            adminName,
+      employee_id:     null,
+      subscription_id: subscriptionId,
+    });
+    if (profileError) throw new Error(profileError.message);
+
+    // 3. If Supabase returned a live session (email confirmation disabled),
+    //    we are already signed in. If the session is null (confirmation email
+    //    was sent), sign in with password immediately so onboarding can
+    //    continue without forcing the admin to check their inbox first.
+    if (!signUpData.session) {
+      const { error: signInError } = await supabase.auth.signInWithPassword({
+        email:    adminEmail,
+        password: password,
+      });
+      if (signInError) {
+        // Supabase is strictly blocking unconfirmed logins — surface a clear message.
+        throw new Error(
+          'Account created — please check your email to confirm your address before signing in.',
+        );
+      }
+    }
+
+    const safe = { id: authUid, email: adminEmail, role: 'admin', name: adminName, employeeId: null, subscriptionId, createdAt: new Date().toISOString() };
+
+    // Prime pendingUserRef exactly like login() does, so that commitLogin()
+    // (called by OnboardingPage after TransitionLoadingScreen finishes) can
+    // actually set the user. Without this, commitLogin() found nothing in
+    // pendingUserRef and silently no-op'd — `user` only got set later (and
+    // racily) via the onAuthStateChange SIGNED_IN listener.
+    pendingUserRef.current = safe;
+    pendingAbacRef.current = null;
+
+    return safe;
+  }, []);
+
+  // ── login ───────────────────────────────────────────────────────────────────
+  /**
+   * 1. Signs in with Supabase Auth (email + password).
+   * 2. Fetches the profile row to get role / subscriptionId.
+   * 3. Runs ABAC policy.
+   * 4. On DENY → throws. On ALLOW/FLAG → stores in refs for commitLogin().
    */
   const login = useCallback(async (email, password) => {
-    // ── Credential check ──────────────────────────────────────────────────
-    const found = await getAccount(email);
-    if (!found || found.password !== password) {
+    // ── Credential check via Supabase Auth ──────────────────────────────────
+    const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
+
+    if (signInError) {
       recordLoginAttempt(email, false);
+      // Surface a friendly message instead of Supabase's raw error
       throw new Error('Invalid email or password');
     }
 
-    const { password: _, ...safe } = found;
+    const authUser = signInData.user;
 
-    // ── ABAC evaluation ───────────────────────────────────────────────────
+    // ── Fetch profile row ────────────────────────────────────────────────────
+    const profile = await fetchProfile(authUser.id);
+    const safe    = buildUser(authUser, profile);
+
+    // ── ABAC evaluation ──────────────────────────────────────────────────────
     const abacResult = await evaluateABACPolicy(safe);
-
     if (abacResult.result === ABAC_RESULT.DENY) {
       recordLoginAttempt(email, false);
+      await supabase.auth.signOut(); // undo the Auth sign-in
       throw new Error(abacResult.reason);
     }
 
-    // ALLOW or FLAG — record success and continue
     recordLoginAttempt(email, true);
 
-    pendingUserRef.current  = safe;
-    pendingAbacRef.current  = abacResult;
+    pendingUserRef.current = safe;
+    pendingAbacRef.current = abacResult;
 
     return { user: safe, abac: abacResult };
   }, []);
 
+  // ── commitLogin ─────────────────────────────────────────────────────────────
   /**
-   * commitLogin()
-   *
    * Called by TransitionLoadingScreen.onComplete.
-   * Actually sets user state and persists to localStorage.
-   * Returns the ABAC result so callers can show flag notices.
+   * Supabase Auth session is already set; we just push the user into state.
    */
   const commitLogin = useCallback(() => {
     const safe = pendingUserRef.current;
@@ -98,26 +212,21 @@ export function AuthProvider({ children }) {
     pendingAbacRef.current = null;
 
     setUser(safe);
-    localStorage.setItem(USER_KEY, JSON.stringify(safe));
-
-    return abac; // caller can inspect abac.flags / abac.result
+    return abac;
   }, []);
 
-  const logout = useCallback(() => {
+  // ── logout ───────────────────────────────────────────────────────────────────
+  const logout = useCallback(async () => {
+    await supabase.auth.signOut();
     setUser(null);
-    localStorage.removeItem(USER_KEY);
     cacheClear();
   }, []);
 
-  /**
-   * can(permission)
-   * Checks whether the current user's role grants the given permission.
-   * The full ABAC time/device/location checks only run at login time.
-   */
+  // ── can ──────────────────────────────────────────────────────────────────────
   const can = useCallback((permission) => abacCan(user, permission), [user]);
 
   return (
-    <AuthContext.Provider value={{ user, login, commitLogin, logout, can, registerCompanyAdmin }}>
+    <AuthContext.Provider value={{ user, authReady, login, commitLogin, logout, can, registerCompanyAdmin }}>
       {children}
     </AuthContext.Provider>
   );

@@ -1,12 +1,13 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Eye, EyeOff, ArrowRight, Clock, FileText, Users, Shield, AlertTriangle } from 'lucide-react';
+import { Eye, EyeOff, ArrowRight, Clock, FileText, Users, Shield, AlertTriangle, CheckCircle } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { Spinner } from '../components/ui';
 import TransitionLoadingScreen from '../components/TransitionLoadingScreen';
 import { getSubscription } from '../utils/db';
 import { ABAC_RESULT } from '../utils/abac';
+import { supabase } from '../utils/supabase';
 
 const FEATURES = [
   { icon: Clock,  label: 'Real-time attendance tracking' },
@@ -41,6 +42,31 @@ export default function LoginPage() {
 
   /** Stores ABAC flags so we can show a notice after login completes */
   const [securityFlags, setSecurityFlags] = useState([]);
+
+  /** Forgot password flow */
+  const [forgotMode,      setForgotMode]      = useState(false);
+  const [forgotEmail,     setForgotEmail]     = useState('');
+  const [forgotLoading,   setForgotLoading]   = useState(false);
+  const [forgotSent,      setForgotSent]      = useState(false);
+  const [forgotError,     setForgotError]     = useState('');
+
+  async function handleForgotPassword(e) {
+    e.preventDefault();
+    setForgotError('');
+    if (!forgotEmail.includes('@')) { setForgotError('Please enter a valid email.'); return; }
+    setForgotLoading(true);
+    try {
+      const { error: resetError } = await supabase.auth.resetPasswordForEmail(forgotEmail, {
+        redirectTo: `${window.location.origin}/reset-password`,
+      });
+      if (resetError) throw resetError;
+      setForgotSent(true);
+    } catch (err) {
+      setForgotError(err.message || 'Failed to send reset email.');
+    } finally {
+      setForgotLoading(false);
+    }
+  }
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -87,6 +113,7 @@ export default function LoginPage() {
   }
 
   return (
+    <>
     <div className="min-h-screen flex" style={{ fontFamily: "'Inter', system-ui, sans-serif" }}>
       {/* Left panel */}
       <div
@@ -208,7 +235,8 @@ export default function LoginPage() {
                   <label className="block text-xs font-semibold text-slate-600 uppercase tracking-wide">
                     Password
                   </label>
-                  <button type="button" className="text-xs text-indigo-600 hover:underline font-medium">
+                  <button type="button" onClick={() => { setForgotMode(true); setForgotEmail(email); setForgotSent(false); setForgotError(''); }}
+                    className="text-xs text-indigo-600 hover:underline font-medium">
                     Forgot password?
                   </button>
                 </div>
@@ -249,5 +277,62 @@ export default function LoginPage() {
         </div>
       </div>
     </div>
+
+    {/* ── Forgot Password overlay ── */}
+    {forgotMode && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4"
+        style={{ background: 'rgba(15,23,42,0.55)', backdropFilter: 'blur(4px)' }}>
+        <div className="bg-white rounded-2xl p-8 w-full max-w-sm shadow-2xl">
+          {forgotSent ? (
+            <div className="flex flex-col items-center text-center gap-3">
+              <div className="w-12 h-12 rounded-full bg-emerald-50 flex items-center justify-center">
+                <CheckCircle size={24} className="text-emerald-500" />
+              </div>
+              <h2 className="text-lg font-bold text-slate-900">Check your email</h2>
+              <p className="text-sm text-slate-500">
+                We sent a password reset link to <strong>{forgotEmail}</strong>. Check your inbox and spam folder.
+              </p>
+              <button
+                onClick={() => { setForgotMode(false); setForgotSent(false); }}
+                className="mt-2 w-full py-2.5 rounded-xl text-sm font-semibold text-white"
+                style={{ background: 'linear-gradient(135deg,#6366f1,#4f46e5)' }}>
+                Back to sign in
+              </button>
+            </div>
+          ) : (
+            <>
+              <h2 className="text-lg font-bold text-slate-900 mb-1">Reset your password</h2>
+              <p className="text-sm text-slate-400 mb-5">Enter your account email and we'll send you a reset link.</p>
+              {forgotError && (
+                <div className="flex items-center gap-2 p-3 rounded-xl mb-4 text-sm"
+                  style={{ background: '#fef2f2', border: '1px solid #fecaca', color: '#991b1b' }}>
+                  <AlertTriangle size={14} className="shrink-0" />{forgotError}
+                </div>
+              )}
+              <form onSubmit={handleForgotPassword} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-600 uppercase tracking-wide mb-1.5">Email</label>
+                  <input
+                    type="email" value={forgotEmail} onChange={e => setForgotEmail(e.target.value)}
+                    autoFocus required placeholder="admin@yourcompany.com"
+                    className="w-full px-3.5 py-2.5 rounded-xl text-sm text-slate-900 bg-slate-50 border border-slate-200 outline-none focus:border-indigo-400 focus:ring-2 focus:bg-white"
+                  />
+                </div>
+                <button type="submit" disabled={forgotLoading}
+                  className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-bold text-white transition-all"
+                  style={{ background: forgotLoading ? '#a5b4fc' : 'linear-gradient(135deg,#6366f1,#4f46e5)' }}>
+                  {forgotLoading ? <Spinner size={15} /> : 'Send reset link'}
+                </button>
+              </form>
+              <button onClick={() => setForgotMode(false)}
+                className="mt-3 w-full text-center text-xs text-slate-400 hover:text-slate-600 transition-colors">
+                Cancel
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    )}
+    </>
   );
 }

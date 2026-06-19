@@ -88,9 +88,9 @@ export default function EmployeesPage() {
     return list;
   }, [EMPLOYEES, search, dept, role, status, sortKey, sortDir]);
 
-  function handleAdd(form) {
+  async function handleAdd(form) {
     try {
-      enrollEmployee(form);
+      await enrollEmployee(form);
       toast('Employee added successfully', 'success');
       setAddModal(false);
     } catch (err) {
@@ -552,7 +552,7 @@ function AddEmployeeModal({ open, onClose, onSave, departments, shifts, seatsAva
     joinDate: new Date().toISOString().split('T')[0],
     employeeCode: '',
     shiftId: '',
-    username: '', password: '',
+    password: '',
   });
   const [idMode, setIdMode] = useState('manual');
   const [showPw, setShowPw] = useState(false);
@@ -575,18 +575,23 @@ function AddEmployeeModal({ open, onClose, onSave, departments, shifts, seatsAva
     if (!form.role.trim()) e.role = 'Required';
     const code = form.employeeCode.trim().toUpperCase();
     if (!code) e.employeeCode = 'Employee ID is required';
-    if (form.username.trim() && form.username.trim().length < 4) e.username = 'Min 4 characters';
-    if (form.username.trim() && !/^[a-z0-9._-]+$/i.test(form.username.trim())) e.username = 'Letters, numbers, . _ - only';
-    if (form.username.trim() && !form.password.trim()) e.password = 'Password required when username is set';
     if (form.password.trim() && form.password.trim().length < 6) e.password = 'Min 6 characters';
     setErrors(e);
     return Object.keys(e).length === 0;
   }
 
+  function handleEmailChange(val) {
+    const derived = val.split('@')[0].toLowerCase().replace(/[^a-z0-9._-]/g, '');
+    f('email')(val);
+    // store derived username internally so callers still get it
+    setForm(prev => ({ ...prev, email: val, username: derived }));
+  }
+
   function handleSave() {
     if (!validate()) return;
-    onSave({ ...form, employeeCode: form.employeeCode.trim().toUpperCase(), username: form.username.trim(), password: form.password });
-    setForm({ firstName: '', middleName: '', lastName: '', suffix: '', email: '', phone: '', role: '', department: departments[0] || '', joinDate: new Date().toISOString().split('T')[0], employeeCode: '', shiftId: '', username: '', password: '' });
+    const username = form.email.split('@')[0].toLowerCase().replace(/[^a-z0-9._-]/g, '');
+    onSave({ ...form, employeeCode: form.employeeCode.trim().toUpperCase(), username, password: form.password });
+    setForm({ firstName: '', middleName: '', lastName: '', suffix: '', email: '', phone: '', role: '', department: departments[0] || '', joinDate: new Date().toISOString().split('T')[0], employeeCode: '', shiftId: '', password: '' });
     setIdMode('manual');
     setShowPw(false);
     setErrors({});
@@ -615,7 +620,7 @@ function AddEmployeeModal({ open, onClose, onSave, departments, shifts, seatsAva
           <InputField label={<span>Middle Name <span className="text-ink-400 font-normal">(optional)</span></span>} value={form.middleName} onChange={f('middleName')} placeholder="Cristina" />
           <InputField label={<span>Suffix <span className="text-ink-400 font-normal">(optional)</span></span>} value={form.suffix} onChange={f('suffix')} placeholder="Jr., Sr., III…" />
         </div>
-        <InputField label="Work Email" type="email" value={form.email} onChange={f('email')} placeholder="m.santos@company.com" error={errors.email} />
+        <InputField label="Work Email" type="email" value={form.email} onChange={handleEmailChange} placeholder="m.santos@company.com" error={errors.email} />
         <div className="grid grid-cols-2 gap-3">
           <PhoneField value={form.phone} onChange={f('phone')} />
           <InputField label="Start Date" type="date" value={form.joinDate} onChange={f('joinDate')} />
@@ -704,53 +709,51 @@ function AddEmployeeModal({ open, onClose, onSave, departments, shifts, seatsAva
             <p className="text-xs font-semibold text-slate-700">Mobile App Credentials</p>
             <span className="text-[10px] text-slate-400 font-normal">(optional)</span>
           </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="label">Username</label>
+
+          {/* Read-only login email */}
+          <div className="mb-3">
+            <label className="label">Login Email</label>
+            <div className="flex items-center gap-2 px-3.5 py-2.5 rounded-xl border text-sm"
+              style={{ background: '#f8fafc', border: '1px solid #e2e8f0', color: '#64748b' }}>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,12 2,6"/></svg>
+              <span className={form.email.includes('@') ? 'text-ink-800' : 'text-ink-300 italic'}>
+                {form.email.includes('@') ? form.email : 'Fill in Work Email above first'}
+              </span>
+            </div>
+            <p className="text-[10px] text-ink-400 mt-1">Employees log in with their work email — no separate username needed.</p>
+          </div>
+
+          {/* Password only */}
+          <div className="max-w-[50%]">
+            <label className="label">Password</label>
+            <div className="relative">
               <input
-                type="text"
-                value={form.username}
-                onChange={e => f('username')(e.target.value.toLowerCase().replace(/\s/g, ''))}
-                placeholder="e.g. m.santos"
-                className={`input w-full font-mono ${errors.username ? 'border-danger-500' : ''}`}
-                autoComplete="off"
+                type={showPw ? 'text' : 'password'}
+                value={form.password}
+                onChange={e => f('password')(e.target.value)}
+                placeholder="Min 6 characters"
+                className={`input w-full pr-9 ${errors.password ? 'border-danger-500' : ''}`}
+                autoComplete="new-password"
               />
-              {errors.username
-                ? <p className="text-xs text-danger-600 mt-1">{errors.username}</p>
-                : <p className="text-[10px] text-ink-400 mt-1">Used to log in to the mobile app</p>
-              }
+              <button type="button" onClick={() => setShowPw(v => !v)}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 transition-colors">
+                {showPw ? <EyeOff size={13} /> : <Eye size={13} />}
+              </button>
             </div>
-            <div>
-              <label className="label">Password</label>
-              <div className="relative">
-                <input
-                  type={showPw ? 'text' : 'password'}
-                  value={form.password}
-                  onChange={e => f('password')(e.target.value)}
-                  placeholder="Min 6 characters"
-                  className={`input w-full pr-9 ${errors.password ? 'border-danger-500' : ''}`}
-                  autoComplete="new-password"
-                />
-                <button type="button" onClick={() => setShowPw(v => !v)}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 transition-colors">
-                  {showPw ? <EyeOff size={13} /> : <Eye size={13} />}
-                </button>
-              </div>
-              {errors.password
-                ? <p className="text-xs text-danger-600 mt-1">{errors.password}</p>
-                : form.password && (
-                  <div className="flex gap-1 mt-1.5">
-                    {[1,2,3,4].map(i => (
-                      <div key={i} className={`h-1 flex-1 rounded-full transition-all ${
-                        form.password.length >= i * 3
-                          ? i <= 1 ? 'bg-red-400' : i <= 2 ? 'bg-amber-400' : i <= 3 ? 'bg-blue-400' : 'bg-emerald-400'
-                          : 'bg-slate-200'
-                      }`} />
-                    ))}
-                  </div>
-                )
-              }
-            </div>
+            {errors.password
+              ? <p className="text-xs text-danger-600 mt-1">{errors.password}</p>
+              : form.password && (
+                <div className="flex gap-1 mt-1.5">
+                  {[1,2,3,4].map(i => (
+                    <div key={i} className={`h-1 flex-1 rounded-full transition-all ${
+                      form.password.length >= i * 3
+                        ? i <= 1 ? 'bg-red-400' : i <= 2 ? 'bg-amber-400' : i <= 3 ? 'bg-blue-400' : 'bg-emerald-400'
+                        : 'bg-slate-200'
+                    }`} />
+                  ))}
+                </div>
+              )
+            }
           </div>
         </div>
       </div>
@@ -836,10 +839,7 @@ function EditEmployeeModal({ open, onClose, onSave, departments, shifts, employe
     if (!form.lastName.trim()) e.lastName = 'Required';
     if (!form.email.includes('@')) e.email = 'Valid email required';
     if (!form.role.trim()) e.role = 'Required';
-    if (form.username.trim() && form.username.trim().length < 4) e.username = 'Min 4 characters';
-    if (form.username.trim() && !/^[a-z0-9._-]+$/i.test(form.username.trim())) e.username = 'Letters, numbers, . _ - only';
     if (form.password.trim() && form.password.trim().length < 6) e.password = 'Min 6 characters';
-    if (form.username.trim() && !employee.username && !form.password.trim()) e.password = 'Password required when setting a new username';
     setErrors(e);
     return Object.keys(e).length === 0;
   }
@@ -871,7 +871,8 @@ function EditEmployeeModal({ open, onClose, onSave, departments, shifts, employe
       profilePhotoUrl = null;
     }
 
-    onSave({ ...form, profilePhotoUrl });
+    const username = form.email.split('@')[0].toLowerCase().replace(/[^a-z0-9._-]/g, '');
+    onSave({ ...form, username, profilePhotoUrl });
   }
 
   return (
@@ -988,56 +989,52 @@ function EditEmployeeModal({ open, onClose, onSave, departments, shifts, employe
             <p className="text-xs font-semibold text-slate-700">Mobile App Credentials</p>
             <span className="text-[10px] text-slate-400 font-normal">(optional)</span>
           </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="label">Username</label>
+
+          {/* Read-only login email */}
+          <div className="mb-3">
+            <label className="label">Login Email</label>
+            <div className="flex items-center gap-2 px-3.5 py-2.5 rounded-xl border text-sm"
+              style={{ background: '#f8fafc', border: '1px solid #e2e8f0', color: '#64748b' }}>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,12 2,6"/></svg>
+              <span className="text-ink-800">{form.email}</span>
+            </div>
+            <p className="text-[10px] text-ink-400 mt-1">Employees log in with their work email — no separate username needed.</p>
+          </div>
+
+          {/* Password only */}
+          <div className="max-w-[50%]">
+            <label className="label">
+              Password
+              {employee.username && <span className="text-[10px] text-ink-400 font-normal ml-1">(leave blank to keep current)</span>}
+            </label>
+            <div className="relative">
               <input
-                type="text"
-                value={form.username}
-                onChange={e => f('username')(e.target.value.toLowerCase().replace(/\s/g, ''))}
-                placeholder="e.g. m.santos"
-                className={`input w-full font-mono ${errors.username ? 'border-danger-500' : ''}`}
-                autoComplete="off"
+                type={showPw ? 'text' : 'password'}
+                value={form.password}
+                onChange={e => f('password')(e.target.value)}
+                placeholder={employee.username ? '••••••' : 'Min 6 characters'}
+                className={`input w-full pr-9 ${errors.password ? 'border-danger-500' : ''}`}
+                autoComplete="new-password"
               />
-              {errors.username
-                ? <p className="text-xs text-danger-600 mt-1">{errors.username}</p>
-                : <p className="text-[10px] text-ink-400 mt-1">Used to log in to the mobile app</p>
-              }
+              <button type="button" onClick={() => setShowPw(v => !v)}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 transition-colors">
+                {showPw ? <EyeOff size={13} /> : <Eye size={13} />}
+              </button>
             </div>
-            <div>
-              <label className="label">
-                Password
-                {employee.username && <span className="text-[10px] text-ink-400 font-normal ml-1">(leave blank to keep current)</span>}
-              </label>
-              <div className="relative">
-                <input
-                  type={showPw ? 'text' : 'password'}
-                  value={form.password}
-                  onChange={e => f('password')(e.target.value)}
-                  placeholder={employee.username ? '••••••' : 'Min 6 characters'}
-                  className={`input w-full pr-9 ${errors.password ? 'border-danger-500' : ''}`}
-                  autoComplete="new-password"
-                />
-                <button type="button" onClick={() => setShowPw(v => !v)}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 transition-colors">
-                  {showPw ? <EyeOff size={13} /> : <Eye size={13} />}
-                </button>
-              </div>
-              {errors.password
-                ? <p className="text-xs text-danger-600 mt-1">{errors.password}</p>
-                : form.password && (
-                  <div className="flex gap-1 mt-1.5">
-                    {[1,2,3,4].map(i => (
-                      <div key={i} className={`h-1 flex-1 rounded-full transition-all ${
-                        form.password.length >= i * 3
-                          ? i <= 1 ? 'bg-red-400' : i <= 2 ? 'bg-amber-400' : i <= 3 ? 'bg-blue-400' : 'bg-emerald-400'
-                          : 'bg-slate-200'
-                      }`} />
-                    ))}
-                  </div>
-                )
-              }
-            </div>
+            {errors.password
+              ? <p className="text-xs text-danger-600 mt-1">{errors.password}</p>
+              : form.password && (
+                <div className="flex gap-1 mt-1.5">
+                  {[1,2,3,4].map(i => (
+                    <div key={i} className={`h-1 flex-1 rounded-full transition-all ${
+                      form.password.length >= i * 3
+                        ? i <= 1 ? 'bg-red-400' : i <= 2 ? 'bg-amber-400' : i <= 3 ? 'bg-blue-400' : 'bg-emerald-400'
+                        : 'bg-slate-200'
+                    }`} />
+                  ))}
+                </div>
+              )
+            }
           </div>
         </div>
       </div>
@@ -1064,7 +1061,7 @@ function EditPendingModal({ pending, departments, shifts, onClose, onSave, onApp
     shiftId:      pending.shiftId     || '',
     employeeCode: pending.employeeCode || '',
     notes:        pending.notes       || '',
-    username:     pending.username    || '',
+    username:     pending.username    || '',   // kept internally, derived from email
     password:     pending.password    || '',
   });
   const [showPw, setShowPw] = useState(false);
@@ -1075,13 +1072,18 @@ function EditPendingModal({ pending, departments, shifts, onClose, onSave, onApp
     const e = {};
     if (!form.firstName.trim()) e.firstName = 'Required';
     if (!form.lastName.trim())  e.lastName  = 'Required';
-    if (!form.email.includes('@')) e.email  = 'Valid email required';
+    if (!form.email.trim() || !form.email.includes('@')) e.email = 'Valid email required';
     if (!form.role.trim()) e.role = 'Required';
-    if (form.username.trim() && form.username.trim().length < 4) e.username = 'Min 4 characters';
     if (form.password.trim() && form.password.trim().length < 6) e.password = 'Min 6 characters';
-    if (form.username.trim() && !form.password.trim()) e.password = 'Password required';
     setErrors(e);
     return Object.keys(e).length === 0;
+  }
+
+  // Keep username in sync with email (derived from local-part)
+  function handleEmailChange(val) {
+    const derived = val.split('@')[0].toLowerCase().replace(/[^a-z0-9._-]/g, '');
+    f('email')(val);
+    f('username')(derived);
   }
 
   function handleSave() {
@@ -1129,7 +1131,7 @@ function EditPendingModal({ pending, departments, shifts, onClose, onSave, onApp
         <div>
           <label className="label">Work Email <span className="text-danger-500">*</span></label>
           <input type="email" className={`input w-full ${errors.email ? 'border-danger-500' : ''}`}
-            value={form.email} onChange={e => f('email')(e.target.value)} placeholder="m.santos@company.com" />
+            value={form.email} onChange={e => handleEmailChange(e.target.value)} placeholder="m.santos@company.com" />
           {errors.email && <p className="text-xs text-danger-600 mt-1">{errors.email}</p>}
         </div>
         <div className="grid grid-cols-2 gap-3">
@@ -1175,62 +1177,63 @@ function EditPendingModal({ pending, departments, shifts, onClose, onSave, onApp
           </div>
         )}
 
-        {/* ── Mobile App Credentials ── */}
+        {/* ── Mobile App Login ── */}
         <div className="pt-3 border-t border-surface-200">
           <div className="flex items-center gap-2 mb-3">
             <div className="w-5 h-5 rounded-md bg-indigo-50 flex items-center justify-center">
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#6366f1" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
             </div>
-            <p className="text-xs font-semibold text-slate-700">Mobile App Credentials</p>
+            <p className="text-xs font-semibold text-slate-700">Mobile App Login</p>
             <span className="text-[10px] text-slate-400 font-normal">(set before approving)</span>
           </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="label">Username</label>
+
+          {/* Read-only login email */}
+          <div className="mb-3">
+            <label className="label">Login Email</label>
+            <div className="flex items-center gap-2 px-3.5 py-2.5 rounded-xl border text-sm"
+              style={{ background: '#f8fafc', border: '1px solid #e2e8f0', color: '#64748b' }}>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,12 2,6"/></svg>
+              <span className={form.email.includes('@') ? 'text-ink-800' : 'text-ink-300 italic'}>
+                {form.email.includes('@') ? form.email : 'Fill in Work Email above'}
+              </span>
+            </div>
+            <p className="text-[10px] text-ink-400 mt-1">Employees log in with their work email — no separate username needed.</p>
+          </div>
+
+          {/* Password only */}
+          <div className="max-w-[50%]">
+            <label className="label">
+              Password
+              {pending.password && <span className="text-[10px] text-ink-400 font-normal ml-1">(leave blank to keep current)</span>}
+            </label>
+            <div className="relative">
               <input
-                type="text"
-                value={form.username}
-                onChange={e => f('username')(e.target.value.toLowerCase().replace(/\s/g, ''))}
-                placeholder="e.g. m.santos"
-                className={`input w-full font-mono ${errors.username ? 'border-danger-500' : ''}`}
-                autoComplete="off"
+                type={showPw ? 'text' : 'password'}
+                value={form.password}
+                onChange={e => f('password')(e.target.value)}
+                placeholder={pending.password ? '••••••' : 'Min 6 characters'}
+                className={`input w-full pr-9 ${errors.password ? 'border-danger-500' : ''}`}
+                autoComplete="new-password"
               />
-              {errors.username
-                ? <p className="text-xs text-danger-600 mt-1">{errors.username}</p>
-                : <p className="text-[10px] text-ink-400 mt-1">Used to log in to the mobile app</p>
-              }
+              <button type="button" onClick={() => setShowPw(v => !v)}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 transition-colors">
+                {showPw ? <EyeOff size={13} /> : <Eye size={13} />}
+              </button>
             </div>
-            <div>
-              <label className="label">Password</label>
-              <div className="relative">
-                <input
-                  type={showPw ? 'text' : 'password'}
-                  value={form.password}
-                  onChange={e => f('password')(e.target.value)}
-                  placeholder="Min 6 characters"
-                  className={`input w-full pr-9 ${errors.password ? 'border-danger-500' : ''}`}
-                  autoComplete="new-password"
-                />
-                <button type="button" onClick={() => setShowPw(v => !v)}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 transition-colors">
-                  {showPw ? <EyeOff size={13} /> : <Eye size={13} />}
-                </button>
-              </div>
-              {errors.password
-                ? <p className="text-xs text-danger-600 mt-1">{errors.password}</p>
-                : form.password && (
-                  <div className="flex gap-1 mt-1.5">
-                    {[1,2,3,4].map(i => (
-                      <div key={i} className={`h-1 flex-1 rounded-full transition-all ${
-                        form.password.length >= i * 3
-                          ? i <= 1 ? 'bg-red-400' : i <= 2 ? 'bg-amber-400' : i <= 3 ? 'bg-blue-400' : 'bg-emerald-400'
-                          : 'bg-slate-200'
-                      }`} />
-                    ))}
-                  </div>
-                )
-              }
-            </div>
+            {errors.password
+              ? <p className="text-xs text-danger-600 mt-1">{errors.password}</p>
+              : form.password && (
+                <div className="flex gap-1 mt-1.5">
+                  {[1,2,3,4].map(i => (
+                    <div key={i} className={`h-1 flex-1 rounded-full transition-all ${
+                      form.password.length >= i * 3
+                        ? i <= 1 ? 'bg-red-400' : i <= 2 ? 'bg-amber-400' : i <= 3 ? 'bg-blue-400' : 'bg-emerald-400'
+                        : 'bg-slate-200'
+                    }`} />
+                  ))}
+                </div>
+              )
+            }
           </div>
         </div>
       </div>
@@ -1282,10 +1285,10 @@ function PendingConfirmModal({ pending, action, onClose, onEdit, onConfirm, seat
           </div>
           <div className="grid grid-cols-2 gap-2 text-xs">
             {[
-              { l: 'Email',       v: pending.email },
-              { l: 'Phone',       v: pending.phone || '—' },
-              { l: 'Start Date',  v: pending.joinDate ? new Date(pending.joinDate).toLocaleDateString() : '—' },
-              { l: 'Employee ID', v: pending.employeeCode || 'Will be assigned' },
+              { l: 'Login Email',  v: pending.email },
+              { l: 'Phone',        v: pending.phone || '—' },
+              { l: 'Start Date',   v: pending.joinDate ? new Date(pending.joinDate).toLocaleDateString() : '—' },
+              { l: 'Employee ID',  v: pending.employeeCode || 'Will be assigned' },
             ].map(({ l, v }) => (
               <div key={l} className="p-2 rounded-lg bg-white border border-surface-100">
                 <p className="label mb-0 text-[10px]">{l}</p>
@@ -1304,6 +1307,13 @@ function PendingConfirmModal({ pending, action, onClose, onEdit, onConfirm, seat
         {isApprove && seatsAvailable === 0 && (
           <div className="p-3 rounded-lg bg-warning-50 border border-warning-200 text-xs text-warning-700">
             Seat limit reached. Upgrade your plan to approve more employees.
+          </div>
+        )}
+
+        {isApprove && !pending.password && (
+          <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-700 flex items-start gap-2">
+            <svg width="14" height="14" className="shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            <span>No password was set. Click <strong>Edit First</strong> to set a password before approving, or the employee won't be able to log in to the mobile app.</span>
           </div>
         )}
 

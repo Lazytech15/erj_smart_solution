@@ -52,6 +52,7 @@ export default function EmployeeRegisterPage() {
   const [idMode, setIdMode] = useState('manual');
   const [errors, setErrors] = useState({});
   const [showPw, setShowPw] = useState(false);
+  const [showConfirmPw, setShowConfirmPw] = useState(false);
   const [form, setForm] = useState({
     firstName: '',
     middleName: '',
@@ -65,8 +66,8 @@ export default function EmployeeRegisterPage() {
     shiftId: '',
     employeeCode: '',
     notes: '',
-    username: '',
     password: '',
+    confirmPassword: '',
   });
 
   const f = (k) => (v) => setForm(prev => ({ ...prev, [k]: v }));
@@ -85,13 +86,14 @@ export default function EmployeeRegisterPage() {
     const e = {};
     if (!form.firstName.trim()) e.firstName = 'Required';
     if (!form.lastName.trim())  e.lastName  = 'Required';
-    if (!form.email.includes('@')) e.email  = 'Valid email required';
+    if (!form.email.trim() || !form.email.includes('@')) e.email = 'Valid email required';
     if (!form.role.trim()) e.role = 'Required';
-    if (!form.username.trim()) e.username = 'Required';
-    if (form.username.trim().length < 4) e.username = 'Min 4 characters';
-    if (!/^[a-z0-9._-]+$/i.test(form.username.trim())) e.username = 'Letters, numbers, . _ - only';
     if (!form.password.trim()) e.password = 'Required';
     if (form.password.trim().length < 6) e.password = 'Min 6 characters';
+    if (!form.confirmPassword.trim()) e.confirmPassword = 'Required';
+    if (form.password && form.confirmPassword && form.password !== form.confirmPassword) {
+      e.confirmPassword = 'Passwords do not match';
+    }
     setErrors(e);
     return Object.keys(e).length === 0;
   }
@@ -99,8 +101,12 @@ export default function EmployeeRegisterPage() {
   function handleSubmit() {
     if (!validate()) return;
     const subId = searchParams.get('sub') || subscription?.subscriptionId;
+    // Derive a username from the email local part (before @)
+    const derivedUsername = form.email.split('@')[0].toLowerCase().replace(/[^a-z0-9._-]/g, '');
+    const { confirmPassword: _cp, ...formWithoutConfirm } = form;
     submitRegistration(subId, {
-      ...form,
+      ...formWithoutConfirm,
+      username: derivedUsername,
       employeeCode: form.employeeCode.trim().toUpperCase(),
     });
     setSubmitted(true);
@@ -279,7 +285,7 @@ export default function EmployeeRegisterPage() {
             )}
           </div>
 
-          {/* ── Mobile App Credentials ── */}
+          {/* ── Account Password ── */}
           <div className="pt-2 border-t border-surface-200">
             <div className="flex items-center gap-2 mb-3">
               <div className="w-5 h-5 rounded-md bg-indigo-50 flex items-center justify-center shrink-0">
@@ -287,25 +293,24 @@ export default function EmployeeRegisterPage() {
               </div>
               <div>
                 <p className="text-xs font-semibold text-slate-700">Mobile App Login</p>
-                <p className="text-[10px] text-slate-400">You'll use these to clock in on the mobile app</p>
+                <p className="text-[10px] text-slate-400">You'll use your work email and this password to clock in</p>
               </div>
             </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="label">Username <span className="text-danger-500">*</span></label>
-                <input
-                  type="text"
-                  value={form.username}
-                  onChange={e => f('username')(e.target.value.toLowerCase().replace(/\s/g, ''))}
-                  placeholder="e.g. m.santos"
-                  autoComplete="off"
-                  className={`input w-full font-mono ${errors.username ? 'border-danger-500' : ''}`}
-                />
-                {errors.username
-                  ? <p className="text-xs text-danger-600 mt-1">{errors.username}</p>
-                  : <p className="text-[10px] text-ink-400 mt-1">Lowercase, no spaces</p>
-                }
+
+            {/* Read-only login email hint */}
+            <div className="mb-3">
+              <label className="label">Login Email</label>
+              <div className="flex items-center gap-2 px-3.5 py-2.5 rounded-xl border text-sm"
+                style={{ background: '#f8fafc', border: '1px solid #e2e8f0', color: '#64748b' }}>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,12 2,6"/></svg>
+                <span className={form.email.includes('@') ? 'text-ink-800' : 'text-ink-300 italic'}>
+                  {form.email.includes('@') ? form.email : 'Fill in your Work Email above first'}
+                </span>
               </div>
+              <p className="text-[10px] text-ink-400 mt-1">Your work email is your login — no separate username needed.</p>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className="label">Password <span className="text-danger-500">*</span></label>
                 <div className="relative">
@@ -334,6 +339,32 @@ export default function EmployeeRegisterPage() {
                         }`} />
                       ))}
                     </div>
+                  )
+                }
+              </div>
+              <div>
+                <label className="label">Confirm Password <span className="text-danger-500">*</span></label>
+                <div className="relative">
+                  <input
+                    type={showConfirmPw ? 'text' : 'password'}
+                    value={form.confirmPassword}
+                    onChange={e => f('confirmPassword')(e.target.value)}
+                    placeholder="Re-enter password"
+                    autoComplete="new-password"
+                    className={`input w-full pr-9 ${errors.confirmPassword ? 'border-danger-500' : ''}`}
+                  />
+                  <button type="button" onClick={() => setShowConfirmPw(v => !v)}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 transition-colors">
+                    {showConfirmPw ? <EyeOff size={13} /> : <Eye size={13} />}
+                  </button>
+                </div>
+                {errors.confirmPassword
+                  ? <p className="text-xs text-danger-600 mt-1">{errors.confirmPassword}</p>
+                  : form.confirmPassword && form.password === form.confirmPassword && (
+                    <p className="text-[10px] text-emerald-500 mt-1 flex items-center gap-1">
+                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                      Passwords match
+                    </p>
                   )
                 }
               </div>

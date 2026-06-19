@@ -181,7 +181,7 @@ export default function SignupPage() {
   const navigate = useNavigate();
   const toast = useToast();
   const { subscribe } = useSubscription();
-  const { registerCompanyAdmin, login } = useAuth();
+  const { registerCompanyAdmin } = useAuth();
 
   const [step, setStep] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -232,7 +232,7 @@ export default function SignupPage() {
     setLoading(true);
     try {
       await new Promise(r => setTimeout(r, 1200));
-      const newSub = subscribe(planId, { ...company, adminName: account.adminName, adminEmail: account.adminEmail },
+      const newSub = await subscribe(planId, { ...company, adminName: account.adminName, adminEmail: account.adminEmail },
         isTrialPlan ? null : {
           card4: billing.cardNumber.slice(-4),
           expiry: billing.expiry,
@@ -245,7 +245,7 @@ export default function SignupPage() {
         password: account.password,
         subscriptionId: newSub.subscriptionId,
       });
-      await login(account.adminEmail, account.password);
+      // registerCompanyAdmin already signs the user in — no need to call login() again.
       toast(
         isTrialPlan
           ? 'Your 14-day free trial has started. Welcome!'

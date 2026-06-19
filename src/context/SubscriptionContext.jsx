@@ -138,20 +138,31 @@ export function SubscriptionProvider({ children }) {
   }, [user?.subscriptionId]); // eslint-disable-line
 
   // ── Core mutator: reads ref (always fresh), writes state + Supabase ──────────
-  const update = useCallback((updater) => {
+  // Returns a Promise now (previously returned the plain object). No existing
+  // caller in this file captures/uses that return value for anything other
+  // than implicitly forwarding it from a wrapping useCallback, and no page
+  // outside this file consumes it either — so this is safe. The Promise lets
+  // callers that need confirmed persistence (e.g. OnboardingPage's
+  // "Finish setup") await the actual Supabase write instead of racing it.
+  const update = useCallback(async (updater) => {
     const current = subRef.current;
     if (!current) {
       console.warn('[SubscriptionContext] update called but subscription is null');
       return null;
     }
-    const next = updater(current);
-    setSubscription(next);        // updates both ref and React state
-    putSubscription(next);        // persist to IndexedDB
+    const next = updater(current);    // may throw synchronously (e.g. seat limit) — propagates to caller
+    setSubscription(next);            // updates both ref and React state
+    await putSubscription(next);      // AWAIT persist to Supabase
     return next;
   }, []); // eslint-disable-line — subRef and setSubscription are stable refs
 
   // ── subscribe() — creates a brand-new subscription on sign-up ───────────────
-  const subscribe = useCallback((planId, company, billing) => {
+  // IMPORTANT: this is now async and AWAITS the Supabase write before
+  // returning. Previously putSubscription(state) was fire-and-forget, so the
+  // very next screen (onboarding → dashboard) could call getSubscription()
+  // before the row actually existed in Postgres, causing a PGRST116
+  // ("0 rows") error on the .single() query and an infinite loading screen.
+  const subscribe = useCallback(async (planId, company, billing) => {
     const isTrial = planId === 'free_trial';
     const subscriptionId = `sub_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const state = {
@@ -188,8 +199,9 @@ export function SubscriptionProvider({ children }) {
       status: isTrial ? 'trialing' : 'active',
       trialEndsAt: isTrial ? new Date(Date.now() + 14*24*60*60*1000).toISOString() : null,
     };
-    setSubscription(state);   // sets both ref and React state
-    putSubscription(state);   // persist immediately
+    setSubscription(state);         // sets both ref and React state (instant UI update)
+    await putSubscription(state);   // AWAIT the Supabase write — caller now knows
+                                     // the row exists before navigating away.
     return state;
   }, []); // eslint-disable-line
 
@@ -202,7 +214,7 @@ export function SubscriptionProvider({ children }) {
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     const rand  = Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
 
-    update(prev => {
+    await update(prev => {
       const plan = PLANS.find(p => p.id === prev.planId);
       if (prev.enrolledEmployees.length >= plan.maxSeats) {
         throw new Error(`Your ${plan.name} plan supports up to ${plan.maxSeats} employees. Please upgrade.`);
@@ -236,7 +248,7 @@ export function SubscriptionProvider({ children }) {
       };
     });
     // Create mobile login account if credentials provided
-    if (employee.username && employee.password) {
+    if (employee.email && employee.password) {
       const name = [employee.firstName, employee.lastName].filter(Boolean).join(' ');
       try {
         await createEmployeeAccount({
@@ -248,7 +260,9 @@ export function SubscriptionProvider({ children }) {
           password: employee.password,
         });
       } catch (err) {
-        console.warn('[enrollEmployee] account creation failed:', err.message);
+        // Re-throw so the caller (handleAdd) can show the error to the user.
+        // The employee row is already saved locally; only the auth account failed.
+        throw new Error(`Employee saved, but account creation failed: ${err.message}`);
       }
     }
   }, [update]);
@@ -494,7 +508,7 @@ export function SubscriptionProvider({ children }) {
     await deletePendingRegistration(pendingId);
     setPendingEmployees(prev => prev.filter(p => p.id !== pendingId));
     // Create mobile login account if credentials provided
-    if (pending.username && pending.password) {
+    if (pending.email && pending.password) {
       const name = [pending.firstName, pending.lastName].filter(Boolean).join(' ');
       try {
         await createEmployeeAccount({

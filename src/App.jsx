@@ -31,10 +31,12 @@ import SubscriptionPage from './pages/SubscriptionPage';
  * fetched (TransitionLoadingScreen waited for it), so loading is near-instant.
  */
 function PrivateRoute({ children }) {
-  const { user } = useAuth();
+  const { user, authReady } = useAuth();
   const { subscription, loading } = useSubscription();
   const location = useLocation();
 
+  // Wait for the Supabase Auth session to be resolved before making a decision
+  if (!authReady) return <LoadingScreen />;
   if (!user) return <Navigate to="/login" replace />;
   if (loading) return <LoadingScreen />;
   if (!subscription) return <Navigate to="/pricing" replace />;
@@ -58,14 +60,14 @@ function RoleRoute({ children, roles }) {
 /**
  * Guard for pages that should only be visible when NOT logged in.
  *
- * Waits for both loading===false AND subscription to be resolved before
- * redirecting, to avoid the one-frame gap after commitLogin() where user is
- * set but subscription is still null — which would cause an infinite loop.
+ * Waits for authReady before redirecting so we don't briefly flash the login
+ * page while Supabase Auth resolves the persisted session.
  */
 function PublicRoute({ children }) {
-  const { user } = useAuth();
+  const { user, authReady } = useAuth();
   const { subscription, loading } = useSubscription();
 
+  if (!authReady) return <LoadingScreen />;
   if (user && (loading || !subscription)) return <LoadingScreen />;
   if (user && subscription.status !== 'cancelled') return <Navigate to="/app/dashboard" replace />;
   return children;

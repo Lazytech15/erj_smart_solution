@@ -1,6 +1,22 @@
 import { supabase } from './supabase';
+import { createClient } from '@supabase/supabase-js';
 import { encryptField, decryptField, encryptFields, decryptFields } from './crypto';
 import { cached, cacheInvalidate } from './cache';
+
+// A second, isolated Supabase client used ONLY for creating employee Auth accounts.
+// It uses persistSession:false so signUp() never overwrites the admin's active session.
+const supabaseNoSession = createClient(
+  import.meta.env.VITE_SUPABASE_URL,
+  import.meta.env.VITE_SUPABASE_ANON_KEY,
+  {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+      detectSessionInUrl: false,
+      storageKey: 'erj_nosession_client',
+    },
+  }
+);
 
 // Reads are cached in-memory for 60s — dashboard/report views re-render
 // often (filters, tab switches, context refreshes) without the underlying
@@ -10,57 +26,49 @@ import { cached, cacheInvalidate } from './cache';
 const READ_TTL_MS = 60_000;
 
 // ─── Account helpers ──────────────────────────────────────────────────────────
+// NOTE: Passwords are now managed exclusively by Supabase Auth.
+// The `accounts` table stores profile metadata only (role, name, employee_id,
+// subscription_id, auth_uid). No password field is written here.
 
 /**
- * Sensitive fields encrypted at rest in the `accounts` table:
- *   - password  (never stored plaintext)
- *
- * Fields intentionally left plaintext so Supabase can filter on them:
- *   - email, role, subscription_id, employee_id, id, name
+ * Fetch a profile row by email.
+ * Used by legacy callers — prefer fetching by auth_uid where possible.
  */
-const ACCOUNT_SENSITIVE_FIELDS = ['password'];
-
 export async function getAccount(email) {
   return cached(`account:${email}`, async () => {
     const { data, error } = await supabase
       .from('accounts')
-      .select('*')
+      .select('auth_uid, email, role, name, employee_id, subscription_id, created_at')
       .eq('email', email)
-      .single();
-    if (error) return null;
-
-    // Decrypt sensitive fields after reading
-    const decrypted = await decryptFields(data, ACCOUNT_SENSITIVE_FIELDS);
+      .maybeSingle();
+    if (error || !data) return null;
 
     return {
-      email:          decrypted.email,
-      password:       decrypted.password,
-      role:           decrypted.role,
-      name:           decrypted.name,
-      id:             decrypted.id,
-      employeeId:     decrypted.employee_id,
-      subscriptionId: decrypted.subscription_id,
-      createdAt:      decrypted.created_at,
+      email:          data.email,
+      role:           data.role,
+      name:           data.name,
+      id:             data.auth_uid,
+      employeeId:     data.employee_id,
+      subscriptionId: data.subscription_id,
+      createdAt:      data.created_at,
     };
   }, READ_TTL_MS);
 }
 
+/**
+ * Upsert a profile row in `accounts`.
+ * This does NOT store a password — auth is handled by supabase.auth.
+ * `account.id` must be the Supabase Auth UUID (auth_uid).
+ */
 export async function putAccount(account) {
-  // Encrypt sensitive fields before writing
-  const encrypted = await encryptFields(
-    {
-      email:           account.email,
-      password:        account.password,
-      role:            account.role,
-      name:            account.name,
-      id:              account.id,
-      employee_id:     account.employeeId     ?? null,
-      subscription_id: account.subscriptionId ?? null,
-    },
-    ACCOUNT_SENSITIVE_FIELDS,
-  );
-
-  const { error } = await supabase.from('accounts').upsert(encrypted);
+  const { error } = await supabase.from('accounts').upsert({
+    auth_uid:        account.id,
+    email:           account.email,
+    role:            account.role,
+    name:            account.name,
+    employee_id:     account.employeeId     ?? null,
+    subscription_id: account.subscriptionId ?? null,
+  }, { onConflict: 'auth_uid' });
   if (error) throw error;
   cacheInvalidate(`account:${account.email}`);
 }
@@ -154,12 +162,12 @@ export async function putSubscription(state) {
 /**
  * Sensitive fields encrypted at rest in `pending_registrations`:
  *   - password   (employee initial credential)
- *   - username   (employee login name — not PII-critical but still a credential)
  *
  * Fields left plaintext for Supabase filtering:
- *   - subscription_id, email, first_name, last_name, role, department, etc.
+ *   - subscription_id, email, first_name, last_name, role, department, username, etc.
+ *   - username is now derived from the email local-part (no longer a secret credential)
  */
-const PENDING_SENSITIVE_FIELDS = ['password', 'username'];
+const PENDING_SENSITIVE_FIELDS = ['password'];
 
 export async function getPendingRegistrations(subscriptionId) {
   return cached(`pending:${subscriptionId}`, async () => {
@@ -199,9 +207,9 @@ export async function getPendingRegistrations(subscriptionId) {
 }
 
 export async function insertPendingRegistration(subscriptionId, form) {
-  // Encrypt credentials before insert
+  // Encrypt password before insert (username is now derived from email, stored plaintext)
   const encCredentials = await encryptFields(
-    { password: form.password ?? null, username: form.username ?? null },
+    { password: form.password ?? null },
     PENDING_SENSITIVE_FIELDS,
   );
 
@@ -221,7 +229,7 @@ export async function insertPendingRegistration(subscriptionId, form) {
       shift_id:        form.shiftId     ?? null,
       employee_code:   form.employeeCode ?? null,
       notes:           form.notes       ?? null,
-      username:        encCredentials.username,
+      username:        form.username    ?? null,   // plaintext, derived from email
       password:        encCredentials.password,
       submitted_at:    new Date().toISOString(),
     })
@@ -233,9 +241,9 @@ export async function insertPendingRegistration(subscriptionId, form) {
 }
 
 export async function updatePendingRegistration(id, form) {
-  // Encrypt credentials before update
+  // Encrypt password before update (username is plaintext)
   const encCredentials = await encryptFields(
-    { password: form.password ?? null, username: form.username ?? null },
+    { password: form.password ?? null },
     PENDING_SENSITIVE_FIELDS,
   );
 
@@ -254,7 +262,7 @@ export async function updatePendingRegistration(id, form) {
       shift_id:      form.shiftId     ?? null,
       employee_code: form.employeeCode ?? null,
       notes:         form.notes       ?? null,
-      username:      encCredentials.username,
+      username:      form.username    ?? null,   // plaintext, derived from email
       password:      encCredentials.password,
     })
     .eq('id', id);
@@ -344,55 +352,102 @@ export async function deleteAnnouncement(id) {
 }
 
 // ─── Employee Mobile Account helpers ──────────────────────────────────────────
-
-/**
- * Sensitive fields encrypted at rest in `accounts` for employee rows:
- *   - password
- * (username/id is the lookup key — cannot be encrypted or .eq() breaks)
- */
+// Employees authenticate via Supabase Auth (email + password).
+// The `accounts` table stores profile metadata; passwords live only in Auth.
+//
+// Uses supabase.auth.signUp (anon key) instead of auth.admin.createUser
+// (service-role key) so this works safely from the browser.
 
 export async function createEmployeeAccount({ employeeId, subscriptionId, name, email, username, password }) {
-  const { data: existing } = await supabase
+  // 1. Check that the email is not already taken in the accounts table
+  const { data: existingProfile } = await supabase
     .from('accounts')
-    .select('id')
-    .eq('id', username)
+    .select('auth_uid')
+    .eq('email', email)
     .maybeSingle();
-  if (existing) throw new Error(`Username "${username}" is already taken.`);
+  if (existingProfile) throw new Error(`An account with email "${email}" already exists.`);
 
-  const encryptedPassword = await encryptField(password);
+  // 2. Create the Supabase Auth user via the isolated no-session client.
+  //    Using supabaseNoSession (persistSession:false) ensures this signUp call
+  //    NEVER overwrites the currently logged-in admin's session.
+  const { data: authData, error: authError } = await supabaseNoSession.auth.signUp({
+    email,
+    password,
+    options: {
+      data: { name, username, employee_id: employeeId },
+      // Suppress the confirmation email — HR already verified the employee.
+      emailRedirectTo: undefined,
+    },
+  });
+  if (authError) throw new Error(authError.message);
 
-  const { error } = await supabase
-    .from('accounts')
-    .insert({
-      id:              username,
-      email:           email,
-      password:        encryptedPassword,
-      role:            'employee',
-      name:            name,
-      employee_id:     employeeId,
-      subscription_id: subscriptionId,
-    });
-  if (error) throw new Error(error.message);
+  // signUp returns a user even when email confirmation is required.
+  // If identities is empty the email is already registered in Auth.
+  const authUser = authData?.user;
+  if (!authUser) throw new Error('Auth sign-up did not return a user.');
+  if (authUser.identities && authUser.identities.length === 0) {
+    throw new Error(`Auth account for "${email}" already exists.`);
+  }
+
+  const authUid = authUser.id;
+
+  // 3. Insert profile row in accounts table.
+  //    IMPORTANT: use supabaseNoSession here, NOT the admin supabase client.
+  //    After signUp() above, supabaseNoSession is now authenticated as the new
+  //    employee (auth.uid() === authUid), so the RLS insert policy passes.
+  //    Using the admin client would fail because admin's auth.uid() !== authUid.
+  const { error: profileError } = await supabaseNoSession.from('accounts').insert({
+    auth_uid:        authUid,
+    email,
+    role:            'employee',
+    name,
+    employee_id:     employeeId,
+    subscription_id: subscriptionId,
+    username,                   // derived from email local-part
+  });
+  if (profileError) throw new Error(profileError.message);
+
   cacheInvalidate(`empacct:${employeeId}`);
 }
 
 export async function updateEmployeeAccount(employeeId, { username, password, name, email }) {
-  const updates = {};
-  if (name)     updates.name  = name;
-  if (email)    updates.email = email;
-  if (username) updates.id    = username;
-
-  // Encrypt the new password if provided
-  if (password) updates.password = await encryptField(password);
-
-  if (Object.keys(updates).length === 0) return;
-
-  const { error } = await supabase
+  // Fetch the auth_uid so we can update Auth user metadata / password
+  const { data: profile } = await supabase
     .from('accounts')
-    .update(updates)
+    .select('auth_uid')
     .eq('employee_id', employeeId)
-    .eq('role', 'employee');
-  if (error) throw new Error(error.message);
+    .eq('role', 'employee')
+    .maybeSingle();
+
+  if (!profile?.auth_uid) return; // no Auth account yet — nothing to update
+
+  // Update Auth user (password and/or email)
+  const authUpdates = {};
+  if (password) authUpdates.password = password;
+  if (email)    authUpdates.email    = email;
+  if (Object.keys(authUpdates).length > 0) {
+    const { error: authError } = await supabase.auth.admin.updateUserById(
+      profile.auth_uid,
+      authUpdates,
+    );
+    if (authError) throw new Error(authError.message);
+  }
+
+  // Update profile row
+  const profileUpdates = {};
+  if (name)     profileUpdates.name     = name;
+  if (email)    profileUpdates.email    = email;
+  if (username) profileUpdates.username = username;
+
+  if (Object.keys(profileUpdates).length > 0) {
+    const { error: profileError } = await supabase
+      .from('accounts')
+      .update(profileUpdates)
+      .eq('employee_id', employeeId)
+      .eq('role', 'employee');
+    if (profileError) throw new Error(profileError.message);
+  }
+
   cacheInvalidate(`empacct:${employeeId}`);
 }
 
@@ -400,13 +455,12 @@ export async function getEmployeeAccount(employeeId) {
   return cached(`empacct:${employeeId}`, async () => {
     const { data, error } = await supabase
       .from('accounts')
-      .select('id, email, name')
+      .select('auth_uid, email, name, username')
       .eq('employee_id', employeeId)
       .eq('role', 'employee')
       .maybeSingle();
     if (error || !data) return null;
-    // id/email/name are not encrypted — return as-is
-    return { username: data.id, email: data.email, name: data.name };
+    return { authUid: data.auth_uid, username: data.username, email: data.email, name: data.name };
   }, READ_TTL_MS);
 }
 
