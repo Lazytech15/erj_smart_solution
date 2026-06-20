@@ -491,3 +491,132 @@ export async function putAttendanceRecords(subscriptionId, records) {
   // attendance_records is also embedded in the cached subscription object.
   cacheInvalidate(`subscription:${subscriptionId}`);
 }
+
+// ─── Superadmin helpers ────────────────────────────────────────────────────────
+// These bypass the normal per-subscription scoping and operate across the
+// entire platform. Only ever called from the superadmin-only route.
+// NOTE: supabase.auth.admin.* calls require a service-role key. They will
+// only succeed if your Supabase project / RLS setup grants this anon client
+// admin rights (same caveat as updateEmployeeAccount() above).
+
+/**
+ * Every subscription/company on the platform, with a lightweight summary
+ * (no need to drag the entire enrolled_employees/attendance blobs along).
+ */
+export async function getAllSubscriptionsSummary() {
+  return cached('superadmin:subscriptions', async () => {
+    const { data, error } = await supabase
+      .from('subscriptions')
+      .select('subscription_id, plan_id, company, billing, status, trial_ends_at, created_at, enrolled_employees')
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    return (data ?? []).map(row => ({
+      subscriptionId: row.subscription_id,
+      planId:         row.plan_id,
+      company:        row.company,
+      billing:        row.billing,
+      status:         row.status,
+      trialEndsAt:    row.trial_ends_at,
+      createdAt:      row.created_at,
+      employeeCount:  (row.enrolled_employees ?? []).length,
+    }));
+  }, READ_TTL_MS);
+}
+
+/** Superadmin: directly change a subscription's plan and/or status. */
+export async function adminUpdateSubscription(subscriptionId, { planId, status } = {}) {
+  const updates = {};
+  if (planId) updates.plan_id = planId;
+  if (status) updates.status  = status;
+  if (Object.keys(updates).length === 0) return;
+
+  const { error } = await supabase
+    .from('subscriptions')
+    .update(updates)
+    .eq('subscription_id', subscriptionId);
+  if (error) throw error;
+  cacheInvalidate(`subscription:${subscriptionId}`);
+  cacheInvalidate('superadmin:subscriptions');
+}
+
+/** Superadmin: permanently delete a subscription/company and its accounts. */
+export async function adminDeleteSubscription(subscriptionId) {
+  await supabase.from('accounts').delete().eq('subscription_id', subscriptionId);
+  const { error } = await supabase.from('subscriptions').delete().eq('subscription_id', subscriptionId);
+  if (error) throw error;
+  cacheInvalidate(`subscription:${subscriptionId}`);
+  cacheInvalidate('superadmin:subscriptions');
+  cacheInvalidate('superadmin:accounts');
+}
+
+/** Every account (admin / hr / manager / employee / superadmin) on the platform. */
+export async function getAllAccounts() {
+  return cached('superadmin:accounts', async () => {
+    const { data, error } = await supabase
+      .from('accounts')
+      .select('auth_uid, email, role, name, employee_id, subscription_id, permissions, created_at')
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    return (data ?? []).map(r => ({
+      id:             r.auth_uid,
+      email:          r.email,
+      role:           r.role,
+      name:           r.name,
+      employeeId:     r.employee_id,
+      subscriptionId: r.subscription_id,
+      permissions:    r.permissions ?? [],
+      createdAt:      r.created_at,
+    }));
+  }, READ_TTL_MS);
+}
+
+/** Superadmin: reset/change the password for ANY account on the platform. */
+export async function adminResetPassword(authUid, newPassword) {
+  const { error } = await supabase.auth.admin.updateUserById(authUid, { password: newPassword });
+  if (error) throw new Error(error.message);
+}
+
+/** Superadmin: change the role of any account (e.g. promote to admin). */
+export async function adminUpdateAccountRole(authUid, role) {
+  // Demoting away from sub_superadmin (or anything else) clears any granted
+  // permissions so a future re-promotion always starts from zero access.
+  const updates = role === 'sub_superadmin' ? { role } : { role, permissions: [] };
+  const { error } = await supabase.from('accounts').update(updates).eq('auth_uid', authUid);
+  if (error) throw error;
+  cacheInvalidate('superadmin:accounts');
+}
+
+/**
+ * Superadmin: grant/revoke fine-grained permissions for a `sub_superadmin`.
+ * Only ever called by a true `superadmin` (enforced in the UI) — a
+ * sub_superadmin can never edit its own or anyone else's permissions.
+ */
+export async function adminSetSubSuperadminPermissions(authUid, permissions) {
+  const { error } = await supabase
+    .from('accounts')
+    .update({ permissions })
+    .eq('auth_uid', authUid)
+    .eq('role', 'sub_superadmin');
+  if (error) throw error;
+  cacheInvalidate('superadmin:accounts');
+}
+
+/** Superadmin: remove an account entirely (does not delete the Auth user). */
+export async function adminDeleteAccount(authUid) {
+  const { error } = await supabase.from('accounts').delete().eq('auth_uid', authUid);
+  if (error) throw error;
+  cacheInvalidate('superadmin:accounts');
+}
+
+/** Platform-wide stats for the superadmin dashboard. */
+export async function getPlatformStats() {
+  const [subs, accounts] = await Promise.all([getAllSubscriptionsSummary(), getAllAccounts()]);
+  return {
+    totalCompanies:     subs.length,
+    activeCompanies:    subs.filter(s => s.status === 'active').length,
+    trialingCompanies:  subs.filter(s => s.status === 'trialing').length,
+    cancelledCompanies: subs.filter(s => s.status === 'cancelled').length,
+    totalEmployees:     subs.reduce((sum, s) => sum + s.employeeCount, 0),
+    totalAccounts:      accounts.length,
+  };
+}

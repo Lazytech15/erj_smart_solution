@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Eye, EyeOff, ArrowRight, Clock, FileText, Users, Shield, AlertTriangle, CheckCircle } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
@@ -39,6 +39,7 @@ export default function LoginPage() {
   const [error,       setError]       = useState('');
   const [transitioning, setTransitioning] = useState(false);
   const [subscriptionPromise, setSubscriptionPromise] = useState(null);
+  const loggedInRoleRef = useRef(null);
 
   /** Stores ABAC flags so we can show a notice after login completes */
   const [securityFlags, setSecurityFlags] = useState([]);
@@ -75,13 +76,14 @@ export default function LoginPage() {
     try {
       const { user, abac } = await login(email, password);
       toast('Welcome back!', 'success');
+      loggedInRoleRef.current = user?.role ?? null;
 
       // Stash flags so we can show the banner after commitLogin
       if (abac?.flags?.length) {
         setSecurityFlags(abac.flags);
       }
 
-      const subPromise = user?.subscriptionId
+      const subPromise = (user?.subscriptionId && !['superadmin', 'sub_superadmin'].includes(user?.role))
         ? getSubscription(user.subscriptionId)
         : Promise.resolve(null);
 
@@ -106,7 +108,7 @@ export default function LoginPage() {
             toast(`Security notice: ${describeFlagCode(code)}`, 'warning');
           });
 
-          navigate('/app/dashboard');
+          navigate(['superadmin', 'sub_superadmin'].includes(loggedInRoleRef.current) ? '/superadmin' : '/app/dashboard');
         }}
       />
     );

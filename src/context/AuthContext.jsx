@@ -23,6 +23,7 @@ function buildUser(authUser, profile) {
     name:           profile?.name            ?? authUser.email,
     employeeId:     profile?.employee_id     ?? null,
     subscriptionId: profile?.subscription_id ?? null,
+    permissions:    profile?.permissions     ?? [],
     createdAt:      authUser.created_at,
   };
 }
@@ -88,7 +89,7 @@ export function AuthProvider({ children }) {
   async function fetchProfile(authUid) {
     const { data } = await supabase
       .from('accounts')
-      .select('role, name, employee_id, subscription_id')
+      .select('role, name, employee_id, subscription_id, permissions')
       .eq('auth_uid', authUid)
       .maybeSingle();
     return data ?? null;

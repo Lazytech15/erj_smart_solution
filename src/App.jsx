@@ -24,6 +24,8 @@ import ShiftsPage from './pages/ShiftsPage';
 import DepartmentsPage from './pages/DepartmentsPage';
 import SettingsPage from './pages/SettingsPage';
 import SubscriptionPage from './pages/SubscriptionPage';
+import SuperAdminLayout from './components/layout/SuperAdminLayout';
+import SuperAdminPage from './pages/SuperAdminPage';
 
 /**
  * Guard: requires auth + a valid subscription.
@@ -58,6 +60,22 @@ function RoleRoute({ children, roles }) {
 }
 
 /**
+ * Guard for the superadmin (platform owner) area.
+ * Deliberately independent of PrivateRoute/SubscriptionProvider — the
+ * superadmin is not scoped to any single company's subscription, so it
+ * must not be redirected to /pricing for lacking one.
+ */
+function SuperAdminRoute({ children }) {
+  const { user, authReady } = useAuth();
+
+  if (!authReady) return <LoadingScreen />;
+  if (!user) return <Navigate to="/login" replace />;
+  if (!['superadmin', 'sub_superadmin'].includes(user.role)) return <Navigate to="/app/dashboard" replace />;
+
+  return children;
+}
+
+/**
  * Guard for pages that should only be visible when NOT logged in.
  *
  * Waits for authReady before redirecting so we don't briefly flash the login
@@ -68,6 +86,7 @@ function PublicRoute({ children }) {
   const { subscription, loading } = useSubscription();
 
   if (!authReady) return <LoadingScreen />;
+  if (['superadmin', 'sub_superadmin'].includes(user?.role)) return <Navigate to="/superadmin" replace />;
   if (user && (loading || !subscription)) return <LoadingScreen />;
   if (user && subscription.status !== 'cancelled') return <Navigate to="/app/dashboard" replace />;
   return children;
@@ -130,6 +149,11 @@ function AppRoutes() {
         <Route path="shifts"       element={<RoleRoute roles={['admin','hr']}><PlanGate feature="shifts"><ShiftsPage /></PlanGate></RoleRoute>} />
         <Route path="departments"  element={<RoleRoute roles={['admin','hr']}><DepartmentsPage /></RoleRoute>} />
         <Route path="settings"     element={<RoleRoute roles={['admin']}><SettingsPage /></RoleRoute>} />
+      </Route>
+
+      {/* ── Superadmin (platform owner) ── */}
+      <Route path="/superadmin" element={<SuperAdminRoute><SuperAdminLayout /></SuperAdminRoute>}>
+        <Route index element={<SuperAdminPage />} />
       </Route>
 
       <Route path="*" element={<Navigate to="/" replace />} />

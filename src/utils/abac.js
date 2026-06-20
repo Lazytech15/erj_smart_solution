@@ -82,6 +82,7 @@ export const ABAC_RESULT = {
  * and FLAGGED for employee (shift work).
  */
 const ROLE_HOURS = {
+  superadmin: { start: 0, end: 24 }, // platform owner — no business-hours restriction
   admin:    { start: 5, end: 22 },   // 5 AM – 10 PM PST
   hr:       { start: 5, end: 22 },
   manager:  { start: 5, end: 23 },
@@ -295,6 +296,20 @@ export async function evaluateABACPolicy(user) {
   const deviceId = getDeviceId();
   const flags    = [];
 
+  // Superadmin (platform owner) bypasses the staff-oriented ABAC heuristics
+  // (business hours, device/geo checks) entirely — still goes through the
+  // brute-force lockout check below.
+  if (role === 'superadmin') {
+    const lockout = isLockedOut(email);
+    if (lockout.locked) {
+      const reason = `Too many failed attempts. Try again in ${lockout.minsLeft} minute(s).`;
+      appendAuditLog({ email, role, deviceId, event: 'LOCKOUT', reason });
+      return { result: ABAC_RESULT.DENY, reason, flags, geoInfo: null, deviceId, isNewDevice: false };
+    }
+    appendAuditLog({ email, role, deviceId, event: ABAC_RESULT.ALLOW, flags: ['superadmin'] });
+    return { result: ABAC_RESULT.ALLOW, reason: null, flags, geoInfo: null, deviceId, isNewDevice: false };
+  }
+
   // ── 1. Brute-force lockout ──────────────────────────────────────────────
   const lockout = isLockedOut(email);
   if (lockout.locked) {
@@ -384,14 +399,33 @@ export async function evaluateABACPolicy(user) {
 // ─── Permission matrix ────────────────────────────────────────────────────────
 
 const ROLE_PERMISSIONS = {
+  superadmin: ['view_all','edit_all','manage_users','manage_subscriptions','manage_all_companies','view_reports','approve_leave','manage_shifts','system_settings','view_audit_log'],
   admin:    ['view_all','edit_all','manage_users','view_reports','approve_leave','manage_shifts','system_settings','view_audit_log'],
   hr:       ['view_all','edit_all','view_reports','approve_leave','manage_shifts'],
   manager:  ['view_team','edit_team','view_reports','approve_leave'],
   employee: ['view_own','request_leave','clock_in_out'],
 };
 
+/**
+ * The full catalogue of fine-grained permissions an actual `superadmin`
+ * can hand out to a `sub_superadmin`. Sub-superadmins have NO permissions
+ * by default — only what's explicitly granted in `accounts.permissions`
+ * (a text[] / jsonb array column) shows up here.
+ */
+export const SUPERADMIN_PERMISSIONS = [
+  { id: 'manage_subscriptions', label: 'Edit subscription plan & status' },
+  { id: 'delete_subscriptions', label: 'Delete subscriptions / companies' },
+  { id: 'manage_accounts',      label: 'Change account roles' },
+  { id: 'reset_passwords',      label: 'Reset account passwords' },
+  { id: 'delete_accounts',      label: 'Delete accounts' },
+];
+
 export function can(user, permission) {
   if (!user) return false;
+  // `superadmin` is the platform owner and is never permission-gated.
+  if (user.role === 'superadmin') return true;
+  // `sub_superadmin` only has whatever was explicitly granted to them.
+  if (user.role === 'sub_superadmin') return (user.permissions ?? []).includes(permission);
   return ROLE_PERMISSIONS[user.role]?.includes(permission) ?? false;
 }
 
