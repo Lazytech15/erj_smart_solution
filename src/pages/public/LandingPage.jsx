@@ -1,34 +1,32 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Clock, Users, BarChart3, Calendar, Shield, Zap,
   ArrowRight, CheckCircle, Building2,
-  ClipboardList, TimerReset, Globe2, Star, ArrowLeft
+  ClipboardList, TimerReset, Globe2, Star, ArrowLeft, Menu, X
 } from 'lucide-react';
 
 /* ─── Design tokens — white/light theme with indigo cards ──────── */
 const C = {
   bg:         '#F3F4F4',
   bgSection:  '#ffffff',
-  bgCard:     '#1e1b4b',           // indigo-900 card
-  bgCardHov:  '#252265',           // slightly lighter indigo on hover
-  bgCardAlt:  '#16144a',           // deeper for variety
+  bgCard:     '#1e1b4b',
+  bgCardHov:  '#252265',
+  bgCardAlt:  '#16144a',
   border:     'rgba(30,27,75,0.12)',
   borderHov:  'rgba(99,102,241,0.5)',
-  brand:      '#6366f1',           // indigo-500
-  brandDark:  '#4f46e5',           // indigo-600
+  brand:      '#6366f1',
+  brandDark:  '#4f46e5',
   brandLight: 'rgba(99,102,241,0.12)',
-  accent:     '#a5b4fc',           // indigo-300 — on dark cards
-  accentWarm: '#818cf8',           // indigo-400
+  accent:     '#a5b4fc',
+  accentWarm: '#818cf8',
   white:      '#ffffff',
-  ink:        '#0f172a',           // near-black for light bg text
-  inkMid:     '#475569',           // slate-600 for light bg subtext
-  inkLight:   '#94a3b8',           // slate-400 for muted light bg text
-  // on-card text
+  ink:        '#0f172a',
+  inkMid:     '#475569',
+  inkLight:   '#94a3b8',
   cardText:   '#ffffff',
   cardSub:    'rgba(255,255,255,0.65)',
   cardMuted:  'rgba(255,255,255,0.4)',
-  // nav
   nav:        'rgba(255,255,255,0.92)',
   navBorder:  'rgba(30,27,75,0.08)',
 };
@@ -73,7 +71,6 @@ function UseScrollReveal() {
         }
       });
     }, { threshold: 0.1 });
-    
     if (domRef.current) observer.observe(domRef.current);
     return () => { if (domRef.current) observer.unobserve(domRef.current); };
   }, []);
@@ -83,13 +80,18 @@ function UseScrollReveal() {
 /* ─── Components ──────────────────────────────────────────────── */
 
 function NavBar({ onLogin, onGetStarted }) {
+  const [menuOpen, setMenuOpen] = useState(false);
+
   const handleScroll = (e, id) => {
     e.preventDefault();
+    setMenuOpen(false);
     const element = document.getElementById(id);
     if (element) {
       element.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
   };
+
+  const navLinks = ['Features', 'How it works', 'Pricing'];
 
   return (
     <header style={{
@@ -100,51 +102,87 @@ function NavBar({ onLogin, onGetStarted }) {
       boxShadow: '0 1px 3px rgba(0,0,0,0.04)',
     }}>
       <div style={{ maxWidth: 1100, margin: '0 auto', padding: '0 clamp(16px, 4vw, 32px)', height: 64, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        {/* Logo and Nav links grouped left to balance layout */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 'clamp(20px, 4vw, 40px)' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer' }} onClick={() => window.scrollTo({top: 0, behavior: 'smooth'})}>
-            <div style={{ width: 34, height: 34, borderRadius: 10, background: 'linear-gradient(135deg, #6366f1, #4f46e5)', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 4px 12px rgba(99,102,241,0.3)' }}>
-              <img src="/logo.svg" alt="ERJ" style={{ width: 20, height: 20, objectFit: 'contain', filter: 'brightness(0) invert(1)' }} />
-            </div>
-            <div>
-              <span style={{ color: C.ink, fontWeight: 800, fontSize: 'clamp(13px, 2vw, 15px)', letterSpacing: '-0.3px' }}>ERJ</span>
-              <span style={{ color: C.brand, fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.1em', marginLeft: 6 }}>Smart Solutions</span>
-            </div>
+        {/* Logo */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, cursor: 'pointer', flexShrink: 0 }} onClick={() => { setMenuOpen(false); window.scrollTo({top: 0, behavior: 'smooth'}); }}>
+          <div style={{ width: 34, height: 34, borderRadius: 10, background: 'linear-gradient(135deg, #6366f1, #4f46e5)', display: 'flex', alignItems: 'center', justifyContent: 'center', boxShadow: '0 4px 12px rgba(99,102,241,0.3)' }}>
+            <img src="/logo.svg" alt="ERJ" style={{ width: 20, height: 20, objectFit: 'contain', filter: 'brightness(0) invert(1)' }} />
           </div>
-
-          <nav style={{ display: 'flex', gap: 'clamp(16px, 3vw, 24px)', alignItems: 'center' }}>
-            {['Features', 'How it works', 'Pricing'].map(l => {
-              const targetId = l.toLowerCase().replace(/ /g, '-');
-              return (
-                <a key={l} href={`#${targetId}`}
-                  onClick={(e) => handleScroll(e, targetId)}
-                  style={{ color: C.inkMid, fontSize: 'clamp(12px, 1.5vw, 14px)', textDecoration: 'none', fontWeight: 500, transition: 'color 0.2s cubic-bezier(0.4, 0, 0.2, 1)' }}
-                  onMouseEnter={e => e.target.style.color = C.brand}
-                  onMouseLeave={e => e.target.style.color = C.inkMid}
-                >{l}</a>
-              );
-            })}
-          </nav>
+          <div>
+            <span style={{ color: C.ink, fontWeight: 800, fontSize: 'clamp(13px, 2vw, 15px)', letterSpacing: '-0.3px' }}>ERJ</span>
+            <span style={{ color: C.brand, fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.1em', marginLeft: 6 }}>Smart Solutions</span>
+          </div>
         </div>
 
-        {/* Actions split cleanly to the right */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        {/* Desktop nav */}
+        <nav className="desktop-nav" style={{ display: 'flex', gap: 'clamp(16px, 3vw, 24px)', alignItems: 'center' }}>
+          {navLinks.map(l => {
+            const targetId = l.toLowerCase().replace(/ /g, '-');
+            return (
+              <a key={l} href={`#${targetId}`}
+                onClick={(e) => handleScroll(e, targetId)}
+                style={{ color: C.inkMid, fontSize: 'clamp(12px, 1.5vw, 14px)', textDecoration: 'none', fontWeight: 500, transition: 'color 0.2s' }}
+                onMouseEnter={e => e.target.style.color = C.brand}
+                onMouseLeave={e => e.target.style.color = C.inkMid}
+              >{l}</a>
+            );
+          })}
+        </nav>
+
+        {/* Desktop action buttons */}
+        <div className="desktop-nav" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <button onClick={onLogin}
-            style={{ background: 'none', border: `1px solid ${C.border}`, color: C.inkMid, fontSize: 'clamp(12px, 1.5vw, 13px)', fontWeight: 600, cursor: 'pointer', padding: '7px 16px', borderRadius: 10, transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)' }}
+            style={{ background: 'none', border: `1px solid ${C.border}`, color: C.inkMid, fontSize: 13, fontWeight: 600, cursor: 'pointer', padding: '7px 16px', borderRadius: 10, transition: 'all 0.2s' }}
             onMouseEnter={e => { e.currentTarget.style.color = C.ink; e.currentTarget.style.borderColor = C.brand; }}
             onMouseLeave={e => { e.currentTarget.style.color = C.inkMid; e.currentTarget.style.borderColor = C.border; }}
-            onMouseDown={e => e.currentTarget.style.transform = 'scale(0.96)'}
-            onMouseUp={e => e.currentTarget.style.transform = 'none'}
           >Sign in</button>
           <button onClick={onGetStarted}
-            style={{ background: `linear-gradient(135deg, ${C.brand}, ${C.brandDark})`, color: '#fff', border: 'none', borderRadius: 10, padding: 'clamp(7px, 1vw, 9px) clamp(14px, 2vw, 20px)', fontSize: 'clamp(12px, 1.5vw, 13px)', fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6, boxShadow: '0 4px 14px rgba(99,102,241,0.28)', transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)' }}
-            onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-1px)'; e.currentTarget.style.boxShadow = '0 6px 20px rgba(99,102,241,0.38)'; }}
-            onMouseLeave={e => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = '0 4px 14px rgba(99,102,241,0.28)'; }}
-            onMouseDown={e => e.currentTarget.style.transform = 'scale(0.96)'}
-            onMouseUp={e => e.currentTarget.style.transform = 'translateY(-1px)'}
-          >Get started <ArrowRight size={13} style={{ transition: 'transform 0.2s' }} /></button>
+            style={{ background: `linear-gradient(135deg, ${C.brand}, ${C.brandDark})`, color: '#fff', border: 'none', borderRadius: 10, padding: '9px 20px', fontSize: 13, fontWeight: 700, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6, boxShadow: '0 4px 14px rgba(99,102,241,0.28)', transition: 'all 0.2s' }}
+            onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-1px)'; }}
+            onMouseLeave={e => { e.currentTarget.style.transform = 'none'; }}
+          >Get started <ArrowRight size={13} /></button>
         </div>
+
+        {/* Mobile hamburger */}
+        <button
+          className="mobile-menu-btn"
+          onClick={() => setMenuOpen(o => !o)}
+          style={{ display: 'none', background: 'none', border: 'none', cursor: 'pointer', padding: 6, color: C.ink, borderRadius: 8 }}
+          aria-label="Toggle menu"
+        >
+          {menuOpen ? <X size={22} /> : <Menu size={22} />}
+        </button>
       </div>
+
+      {/* Mobile dropdown menu */}
+      {menuOpen && (
+        <div className="mobile-menu" style={{
+          background: C.nav,
+          backdropFilter: 'blur(20px)',
+          borderTop: `1px solid ${C.navBorder}`,
+          padding: '12px 20px 20px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 4,
+        }}>
+          {navLinks.map(l => {
+            const targetId = l.toLowerCase().replace(/ /g, '-');
+            return (
+              <a key={l} href={`#${targetId}`}
+                onClick={(e) => handleScroll(e, targetId)}
+                style={{ color: C.inkMid, fontSize: 15, textDecoration: 'none', fontWeight: 500, padding: '10px 4px', borderBottom: `1px solid ${C.navBorder}`, display: 'block' }}
+              >{l}</a>
+            );
+          })}
+          <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
+            <button onClick={() => { setMenuOpen(false); onLogin(); }}
+              style={{ flex: 1, background: 'none', border: `1px solid ${C.border}`, color: C.inkMid, fontSize: 14, fontWeight: 600, cursor: 'pointer', padding: '10px 0', borderRadius: 10 }}
+            >Sign in</button>
+            <button onClick={() => { setMenuOpen(false); onGetStarted(); }}
+              style={{ flex: 1, background: `linear-gradient(135deg, ${C.brand}, ${C.brandDark})`, color: '#fff', border: 'none', borderRadius: 10, padding: '10px 0', fontSize: 14, fontWeight: 700, cursor: 'pointer', boxShadow: '0 4px 14px rgba(99,102,241,0.28)' }}
+            >Get started</button>
+          </div>
+        </div>
+      )}
     </header>
   );
 }
@@ -152,9 +190,8 @@ function NavBar({ onLogin, onGetStarted }) {
 function Hero({ onGetStarted, onViewPricing }) {
   return (
     <section style={{ textAlign: 'center', padding: 'clamp(48px, 8vw, 88px) clamp(16px, 4vw, 32px) clamp(48px, 8vw, 80px)', position: 'relative', overflow: 'hidden', background: C.bgSection }}>
-      {/* Cohesive top brand line animation hook */}
       <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 3, background: `linear-gradient(90deg, ${C.brand}, #8b5cf6, ${C.brand})` }} />
-      <div style={{ position: 'absolute', top: -60, left: '50%', transform: 'translateX(-50%)', width: 'clamp(400px, 70vw, 700px)', height: 300, borderRadius: '50%', background: 'radial-gradient(ellipse, rgba(99,102,241,0.07) 0%, transparent 70%)', pointerEvents: 'none' }} />
+      <div style={{ position: 'absolute', top: -60, left: '50%', transform: 'translateX(-50%)', width: 'clamp(300px, 70vw, 700px)', height: 300, borderRadius: '50%', background: 'radial-gradient(ellipse, rgba(99,102,241,0.07) 0%, transparent 70%)', pointerEvents: 'none' }} />
 
       <div className="reveal-visible" style={{ animation: 'fadeUp 0.8s cubic-bezier(0.16, 1, 0.3, 1) forwards' }}>
         {/* Badge */}
@@ -163,7 +200,7 @@ function Hero({ onGetStarted, onViewPricing }) {
         </div>
 
         {/* Headline */}
-        <h1 style={{ fontSize: 'clamp(36px, 5.5vw, 62px)', fontWeight: 800, color: C.ink, lineHeight: 1.1, letterSpacing: '-1.5px', maxWidth: 840, margin: '0 auto 20px' }}>
+        <h1 style={{ fontSize: 'clamp(32px, 5.5vw, 62px)', fontWeight: 800, color: C.ink, lineHeight: 1.1, letterSpacing: '-1px', maxWidth: 840, margin: '0 auto 20px' }}>
           Attendance tracking your{' '}
           <span style={{ background: `linear-gradient(135deg, ${C.brand}, #8b5cf6)`, WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>
             whole team
@@ -171,37 +208,47 @@ function Hero({ onGetStarted, onViewPricing }) {
           will actually use
         </h1>
 
-        {/* Subhead with conversion copy fix */}
-        <p style={{ fontSize: 'clamp(15px, 2vw, 18px)', color: C.inkMid, lineHeight: 1.65, maxWidth: 580, margin: `0 auto 36px` }}>
+        {/* Subhead */}
+        <p style={{ fontSize: 'clamp(14px, 2vw, 18px)', color: C.inkMid, lineHeight: 1.65, maxWidth: 580, margin: `0 auto 36px` }}>
           Clock-ins, leave approvals, shift schedules, and payroll-ready reports — in one system that takes minutes to set up for your entire team.
-          </p>
+        </p>
 
-        {/* Clear Action Hierarchy CTAs */}
+        {/* CTAs */}
         <div style={{ display: 'flex', gap: 14, justifyContent: 'center', flexWrap: 'wrap', alignItems: 'center' }}>
           <button onClick={onGetStarted}
-            style={{ background: `linear-gradient(135deg, ${C.brand}, ${C.brandDark})`, color: '#fff', border: 'none', borderRadius: 12, padding: 'clamp(12px, 2vw, 15px) clamp(28px, 3.5vw, 36px)', fontSize: 'clamp(14px, 1.8vw, 15px)', fontWeight: 700, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 8, boxShadow: '0 8px 24px rgba(99,102,241,0.25)', transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)' }}
-            onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = '0 12px 28px rgba(99,102,241,0.35)'; }}
-            onMouseLeave={e => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = '0 8px 24px rgba(99,102,241,0.25)'; }}
-            onMouseDown={e => e.currentTarget.style.transform = 'scale(0.97)'}
+            style={{ background: `linear-gradient(135deg, ${C.brand}, ${C.brandDark})`, color: '#fff', border: 'none', borderRadius: 12, padding: 'clamp(12px, 2vw, 15px) clamp(24px, 3.5vw, 36px)', fontSize: 'clamp(14px, 1.8vw, 15px)', fontWeight: 700, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 8, boxShadow: '0 8px 24px rgba(99,102,241,0.25)', transition: 'all 0.2s' }}
+            onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-2px)'; }}
+            onMouseLeave={e => { e.currentTarget.style.transform = 'none'; }}
           >Start free trial <ArrowRight size={15} /></button>
-          
+
           <button onClick={onViewPricing}
             style={{ background: 'transparent', color: C.inkMid, border: 'none', borderRadius: 12, padding: '12px 20px', fontSize: 'clamp(14px, 1.8vw, 15px)', fontWeight: 600, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 4, transition: 'all 0.2s' }}
-            onMouseEnter={e => { e.currentTarget.style.color = C.brand; e.currentTarget.children[0].style.transform = 'translateX(3px)'; }}
-            onMouseLeave={e => { e.currentTarget.style.color = C.inkMid; e.currentTarget.children[0].style.transform = 'none'; }}
-          >See pricing <span style={{ transition: 'transform 0.2s', display: 'inline-block' }}>→</span></button>
+            onMouseEnter={e => { e.currentTarget.style.color = C.brand; }}
+            onMouseLeave={e => { e.currentTarget.style.color = C.inkMid; }}
+          >See pricing <span style={{ display: 'inline-block' }}>→</span></button>
         </div>
 
-        {/* High-contrast metrics bar with improved internal vertical padding */}
-        <div style={{ display: 'inline-grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 'clamp(20px, 4vw, 44px)', marginTop: 'clamp(44px, 6vw, 60px)', padding: 'clamp(24px, 3.5vw, 32px) clamp(24px, 5vw, 56px)', borderRadius: 24, background: C.bgCard, boxShadow: '0 12px 40px rgba(30,27,75,0.16)' }}>
+        {/* Metrics bar — 2×2 on mobile, 4-col on desktop */}
+        <div className="metrics-grid" style={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(2, 1fr)',
+          gap: 'clamp(16px, 3vw, 32px)',
+          marginTop: 'clamp(44px, 6vw, 60px)',
+          padding: 'clamp(20px, 3vw, 32px) clamp(20px, 4vw, 48px)',
+          borderRadius: 24,
+          background: C.bgCard,
+          boxShadow: '0 12px 40px rgba(30,27,75,0.16)',
+          maxWidth: 480,
+          margin: 'clamp(44px, 6vw, 60px) auto 0',
+        }}>
           {[
-            { v: '98%',  l: 'attendance accuracy' },
-            { v: '<2 min', l: 'setup time' },
-            { v: '14 days',l: 'free trial' },
-            { v: '₱150/mo',l: 'starting price' },
+            { v: '98%',    l: 'Attendance accuracy' },
+            { v: '<2 min', l: 'Setup time' },
+            { v: '14 days',l: 'Free trial' },
+            { v: '₱150/mo',l: 'Starting price' },
           ].map(({ v, l }) => (
             <div key={l} style={{ textAlign: 'center' }}>
-              <div style={{ color: C.accent,尊貴: '800', fontWeight: 800, fontSize: 'clamp(18px, 2.5vw, 26px)', letterSpacing: '-0.5px' }}>{v}</div>
+              <div style={{ color: C.accent, fontWeight: 800, fontSize: 'clamp(20px, 3vw, 28px)', letterSpacing: '-0.5px' }}>{v}</div>
               <div style={{ color: C.cardMuted, fontSize: 'clamp(10px, 1.2vw, 12px)', marginTop: 6, textTransform: 'uppercase', letterSpacing: '0.05em' }}>{l}</div>
             </div>
           ))}
@@ -218,12 +265,12 @@ function Features() {
       <div ref={revealRef} className="reveal-element" style={{ maxWidth: 1100, margin: '0 auto' }}>
         <div style={{ textAlign: 'center', marginBottom: 'clamp(32px, 5vw, 52px)' }}>
           <div style={{ display: 'inline-block', color: C.brand, fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.12em', padding: '4px 14px', borderRadius: 999, background: 'rgba(99,102,241,0.06)', border: '1px solid rgba(99,102,241,0.15)' }}>Features</div>
-          <h2 style={{ color: C.ink, fontSize: 'clamp(26px, 4vw, 36px)', fontWeight: 800, letterSpacing: '-0.8px', marginTop: 12 }}>Everything your HR team needs</h2>
+          <h2 style={{ color: C.ink, fontSize: 'clamp(24px, 4vw, 36px)', fontWeight: 800, letterSpacing: '-0.8px', marginTop: 12 }}>Everything your HR team needs</h2>
         </div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(290px, 100%), 1fr))', gap: 'clamp(14px, 2vw, 20px)' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(280px, 100%), 1fr))', gap: 'clamp(14px, 2vw, 20px)' }}>
           {FEATURES.map(({ icon: Icon, title, body }) => (
             <div key={title}
-              style={{ background: C.bgCard, border: `1px solid rgba(99,102,241,0.15)`, borderRadius: 20, padding: 'clamp(24px, 2.5vw, 32px)', transition: 'transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.25s, background-color 0.2s', boxShadow: '0 4px 16px rgba(30,27,75,0.04)' }}
+              style={{ background: C.bgCard, border: `1px solid rgba(99,102,241,0.15)`, borderRadius: 20, padding: 'clamp(20px, 2.5vw, 32px)', transition: 'transform 0.25s, box-shadow 0.25s', boxShadow: '0 4px 16px rgba(30,27,75,0.04)' }}
               onMouseEnter={e => { e.currentTarget.style.background = C.bgCardHov; e.currentTarget.style.transform = 'translateY(-4px)'; e.currentTarget.style.boxShadow = '0 16px 36px rgba(30,27,75,0.2)'; }}
               onMouseLeave={e => { e.currentTarget.style.background = C.bgCard; e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = '0 4px 16px rgba(30,27,75,0.04)'; }}
             >
@@ -247,11 +294,11 @@ function HowItWorks() {
       <div ref={revealRef} className="reveal-element" style={{ maxWidth: 1100, margin: '0 auto' }}>
         <div style={{ textAlign: 'center', marginBottom: 'clamp(32px, 5vw, 52px)' }}>
           <div style={{ display: 'inline-block', color: C.brand, fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.12em', padding: '4px 14px', borderRadius: 999, background: 'rgba(99,102,241,0.06)', border: '1px solid rgba(99,102,241,0.15)' }}>How it works</div>
-          <h2 style={{ color: C.ink, fontSize: 'clamp(26px, 4vw, 36px)', fontWeight: 800, letterSpacing: '-0.8px', marginTop: 12 }}>Up and running in minutes</h2>
+          <h2 style={{ color: C.ink, fontSize: 'clamp(24px, 4vw, 36px)', fontWeight: 800, letterSpacing: '-0.8px', marginTop: 12 }}>Up and running in minutes</h2>
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(220px, 100%), 1fr))', gap: 'clamp(14px, 2vw, 20px)' }}>
           {STEPS.map(({ icon: Icon, title, desc }, i) => (
-            <div key={title} style={{ background: C.bgCard, border: `1px solid rgba(99,102,241,0.15)`, borderRadius: 20, padding: 'clamp(24px, 2.5vw, 32px)', position: 'relative', boxShadow: '0 4px 16px rgba(30,27,75,0.04)' }}>
+            <div key={title} style={{ background: C.bgCard, border: `1px solid rgba(99,102,241,0.15)`, borderRadius: 20, padding: 'clamp(20px, 2.5vw, 32px)', position: 'relative', boxShadow: '0 4px 16px rgba(30,27,75,0.04)' }}>
               <div style={{ position: 'relative', width: 46, height: 46, marginBottom: 20 }}>
                 <div style={{ width: 46, height: 46, borderRadius: 13, background: 'rgba(99,102,241,0.18)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                   <Icon size={19} color={C.accent} />
@@ -275,11 +322,11 @@ function Testimonials() {
       <div ref={revealRef} className="reveal-element" style={{ maxWidth: 1100, margin: '0 auto' }}>
         <div style={{ textAlign: 'center', marginBottom: 'clamp(32px, 5vw, 52px)' }}>
           <div style={{ display: 'inline-block', color: C.brand, fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.12em', padding: '4px 14px', borderRadius: 999, background: 'rgba(99,102,241,0.06)', border: '1px solid rgba(99,102,241,0.15)' }}>Customers</div>
-          <h2 style={{ color: C.ink, fontSize: 'clamp(26px, 4vw, 36px)', fontWeight: 800, letterSpacing: '-0.8px', marginTop: 12 }}>Trusted by HR teams of all sizes</h2>
+          <h2 style={{ color: C.ink, fontSize: 'clamp(24px, 4vw, 36px)', fontWeight: 800, letterSpacing: '-0.8px', marginTop: 12 }}>Trusted by HR teams of all sizes</h2>
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(280px, 100%), 1fr))', gap: 'clamp(14px, 2vw, 20px)' }}>
           {TESTIMONIALS.map(({ quote, name, role }) => (
-            <div key={name} style={{ background: C.bgCard, border: `1px solid rgba(99,102,241,0.15)`, borderRadius: 20, padding: 'clamp(24px, 2.5vw, 32px)', display: 'flex', flexDirection: 'column', gap: 16, boxShadow: '0 4px 16px rgba(30,27,75,0.04)' }}>
+            <div key={name} style={{ background: C.bgCard, border: `1px solid rgba(99,102,241,0.15)`, borderRadius: 20, padding: 'clamp(20px, 2.5vw, 32px)', display: 'flex', flexDirection: 'column', gap: 16, boxShadow: '0 4px 16px rgba(30,27,75,0.04)' }}>
               <div style={{ display: 'flex', gap: 4 }}>
                 {[...Array(5)].map((_, i) => <Star key={i} size={13} color={C.accent} fill={C.accent} />)}
               </div>
@@ -303,14 +350,14 @@ function Pricing({ onGetStarted }) {
       <div ref={revealRef} className="reveal-element" style={{ maxWidth: 900, margin: '0 auto' }}>
         <div style={{ textAlign: 'center', marginBottom: 'clamp(32px, 5vw, 52px)' }}>
           <div style={{ display: 'inline-block', color: C.brand, fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.12em', padding: '4px 14px', borderRadius: 999, background: 'rgba(99,102,241,0.06)', border: '1px solid rgba(99,102,241,0.15)' }}>Pricing</div>
-          <h2 style={{ color: C.ink, fontSize: 'clamp(26px, 4vw, 36px)', fontWeight: 800, letterSpacing: '-0.8px', marginTop: 12, marginBottom: 12 }}>Pay only for who you enroll</h2>
+          <h2 style={{ color: C.ink, fontSize: 'clamp(24px, 4vw, 36px)', fontWeight: 800, letterSpacing: '-0.8px', marginTop: 12, marginBottom: 12 }}>Pay only for who you enroll</h2>
           <p style={{ color: C.inkMid, fontSize: 'clamp(14px, 1.8vw, 16px)' }}>Remove an employee, stop paying for them. No commitments you can't change.</p>
         </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(240px, 100%), 1fr))', gap: 'clamp(16px, 2.5vw, 24px)', marginBottom: 'clamp(32px, 5vw, 48px)', alignItems: 'center' }}>
           {PLANS.map(p => (
             <div key={p.name}
-              style={{ position: 'relative', background: C.bgCard, border: p.badge ? `2px solid ${C.brand}` : `1px solid rgba(99,102,241,0.15)`, borderRadius: 22, padding: p.badge ? 'clamp(32px, 4vw, 44px) clamp(16px, 2.5vw, 28px)' : 'clamp(24px, 3vw, 36px) clamp(16px, 2.5vw, 28px)', textAlign: 'center', transition: 'transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.25s', boxShadow: p.badge ? '0 8px 32px rgba(99,102,241,0.15)' : '0 4px 16px rgba(30,27,75,0.04)' }}
+              style={{ position: 'relative', background: C.bgCard, border: p.badge ? `2px solid ${C.brand}` : `1px solid rgba(99,102,241,0.15)`, borderRadius: 22, padding: p.badge ? 'clamp(28px, 4vw, 44px) clamp(16px, 2.5vw, 28px)' : 'clamp(20px, 3vw, 36px) clamp(16px, 2.5vw, 28px)', textAlign: 'center', transition: 'transform 0.25s, box-shadow 0.25s', boxShadow: p.badge ? '0 8px 32px rgba(99,102,241,0.15)' : '0 4px 16px rgba(30,27,75,0.04)' }}
               onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-6px)'; e.currentTarget.style.boxShadow = '0 20px 44px rgba(30,27,75,0.22)'; }}
               onMouseLeave={e => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = p.badge ? '0 8px 32px rgba(99,102,241,0.15)' : '0 4px 16px rgba(30,27,75,0.04)'; }}
             >
@@ -325,7 +372,7 @@ function Pricing({ onGetStarted }) {
                 </div>
               )}
               <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'center', gap: 3, margin: '12px 0' }}>
-                <span style={{ color: C.accent, fontSize: 'clamp(32px, 4.5vw, 44px)', fontWeight: 800, letterSpacing: '-1px' }}>₱{p.price}</span>
+                <span style={{ color: C.accent, fontSize: 'clamp(28px, 4.5vw, 44px)', fontWeight: 800, letterSpacing: '-1px' }}>₱{p.price}</span>
                 <span style={{ color: C.cardMuted, fontSize: 12.5 }}>/emp/mo</span>
               </div>
               <div style={{ color: C.cardSub, fontSize: 12.5, marginBottom: 4 }}>Up to {p.seats} employees</div>
@@ -336,10 +383,9 @@ function Pricing({ onGetStarted }) {
 
         <div style={{ textAlign: 'center' }}>
           <button onClick={onGetStarted}
-            style={{ background: `linear-gradient(135deg, ${C.brand}, ${C.brandDark})`, color: '#fff', border: 'none', borderRadius: 12, padding: 'clamp(12px, 2vw, 16px) clamp(28px, 3.5vw, 40px)', fontSize: 'clamp(14px, 1.8vw, 15px)', fontWeight: 700, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 8, boxShadow: '0 8px 24px rgba(99,102,241,0.25)', transition: 'all 0.2s cubic-bezier(0.4, 0, 0.2, 1)' }}
-            onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-1px)'; e.currentTarget.style.boxShadow = '0 12px 28px rgba(99,102,241,0.35)'; }}
-            onMouseLeave={e => { e.currentTarget.style.transform = 'none'; e.currentTarget.style.boxShadow = '0 8px 24px rgba(99,102,241,0.25)'; }}
-            onMouseDown={e => e.currentTarget.style.transform = 'scale(0.97)'}
+            style={{ background: `linear-gradient(135deg, ${C.brand}, ${C.brandDark})`, color: '#fff', border: 'none', borderRadius: 12, padding: 'clamp(12px, 2vw, 16px) clamp(24px, 3.5vw, 40px)', fontSize: 'clamp(14px, 1.8vw, 15px)', fontWeight: 700, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 8, boxShadow: '0 8px 24px rgba(99,102,241,0.25)', transition: 'all 0.2s' }}
+            onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-1px)'; }}
+            onMouseLeave={e => { e.currentTarget.style.transform = 'none'; }}
           >Start 14-day free trial <ArrowRight size={15} /></button>
           <p style={{ color: C.inkLight, fontSize: 12, marginTop: 14 }}>Full access during trial · No credit card · Cancel any time</p>
         </div>
@@ -361,7 +407,7 @@ function Footer({ onLogin }) {
             <span style={{ color: C.brand, fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.1em', marginLeft: 6 }}>Smart Solutions</span>
           </div>
         </div>
-        <div style={{ display: 'flex', gap: 24, alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: 'clamp(12px, 3vw, 24px)', alignItems: 'center', flexWrap: 'wrap' }}>
           <span style={{ color: C.inkLight, fontSize: 12 }}>© {new Date().getFullYear()} ERJ Smart Solutions</span>
           {['Features', 'Pricing'].map(l => (
             <a key={l} href={`#${l.toLowerCase()}`} style={{ color: C.inkLight, fontSize: 12, textDecoration: 'none', transition: 'color 0.15s' }}
@@ -379,7 +425,7 @@ function Footer({ onLogin }) {
   );
 }
 
-/* ─── Page Container injecting global styles ───────────────────── */
+/* ─── Page Container ───────────────────────────────────────────── */
 export default function LandingPage() {
   const navigate = useNavigate();
   const goSignup = () => navigate('/pricing');
@@ -387,7 +433,6 @@ export default function LandingPage() {
 
   return (
     <div style={{ minHeight: '100vh', background: C.bg, color: C.ink, fontFamily: 'Inter, system-ui, sans-serif' }}>
-      {/* Dynamic Keyframes Injection */}
       <style>{`
         html { scroll-behavior: smooth; }
         @keyframes fadeUp {
@@ -403,8 +448,24 @@ export default function LandingPage() {
           opacity: 1 !important;
           transform: translateY(0) !important;
         }
+
+        /* ── Responsive breakpoints ── */
+        @media (min-width: 640px) {
+          .desktop-nav { display: flex !important; }
+          .mobile-menu-btn { display: none !important; }
+          .mobile-menu { display: none !important; }
+          .metrics-grid {
+            grid-template-columns: repeat(4, 1fr) !important;
+            max-width: none !important;
+          }
+        }
+
+        @media (max-width: 639px) {
+          .desktop-nav { display: none !important; }
+          .mobile-menu-btn { display: flex !important; align-items: center; justify-content: center; }
+        }
       `}</style>
-      
+
       <NavBar onLogin={goLogin} onGetStarted={goSignup} />
       <main>
         <Hero onGetStarted={goSignup} onViewPricing={goSignup} />

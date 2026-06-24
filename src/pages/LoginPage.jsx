@@ -166,7 +166,7 @@ export default function LoginPage() {
           </div>
 
           <div
-            className="grid grid-cols-3 gap-4 mt-10 pt-8 border-t"
+            className="grid grid-cols-1 sm:grid-cols-3 gap-4 mt-10 pt-8 border-t"
             style={{ borderColor: 'rgba(255,255,255,0.07)' }}
           >
             {[

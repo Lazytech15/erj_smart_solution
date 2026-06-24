@@ -1,7 +1,8 @@
 import { useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { CheckCircle, Wand2, PenLine, RefreshCw, UserCheck, Eye, EyeOff } from 'lucide-react';
+import { CheckCircle, Wand2, PenLine, RefreshCw, UserCheck } from 'lucide-react';
 import { useSubscription } from '../../context/SubscriptionContext';
+import PasswordStrengthField, { isPasswordStrong } from '../../components/PasswordStrengthField';
 
 /* ── Phone helpers (mirrors EmployeesPage) ── */
 function toLocalPhone(full) {
@@ -51,7 +52,6 @@ export default function EmployeeRegisterPage() {
   const [submitted, setSubmitted] = useState(false);
   const [idMode, setIdMode] = useState('manual');
   const [errors, setErrors] = useState({});
-  const [showPw, setShowPw] = useState(false);
   const [showConfirmPw, setShowConfirmPw] = useState(false);
   const [form, setForm] = useState({
     firstName: '',
@@ -89,7 +89,7 @@ export default function EmployeeRegisterPage() {
     if (!form.email.trim() || !form.email.includes('@')) e.email = 'Valid email required';
     if (!form.role.trim()) e.role = 'Required';
     if (!form.password.trim()) e.password = 'Required';
-    if (form.password.trim().length < 6) e.password = 'Min 6 characters';
+    else if (!isPasswordStrong(form.password)) e.password = 'Password does not meet all requirements';
     if (!form.confirmPassword.trim()) e.confirmPassword = 'Required';
     if (form.password && form.confirmPassword && form.password !== form.confirmPassword) {
       e.confirmPassword = 'Passwords do not match';
@@ -310,64 +310,45 @@ export default function EmployeeRegisterPage() {
               <p className="text-[10px] text-ink-400 mt-1">Your work email is your login — no separate username needed.</p>
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="label">Password <span className="text-danger-500">*</span></label>
-                <div className="relative">
-                  <input
-                    type={showPw ? 'text' : 'password'}
-                    value={form.password}
-                    onChange={e => f('password')(e.target.value)}
-                    placeholder="Min 6 characters"
-                    autoComplete="new-password"
-                    className={`input w-full pr-9 ${errors.password ? 'border-danger-500' : ''}`}
-                  />
-                  <button type="button" onClick={() => setShowPw(v => !v)}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 transition-colors">
-                    {showPw ? <EyeOff size={13} /> : <Eye size={13} />}
-                  </button>
-                </div>
-                {errors.password
-                  ? <p className="text-xs text-danger-600 mt-1">{errors.password}</p>
-                  : form.password && (
-                    <div className="flex gap-1 mt-1.5">
-                      {[1,2,3,4].map(i => (
-                        <div key={i} className={`h-1 flex-1 rounded-full transition-all ${
-                          form.password.length >= i * 3
-                            ? i <= 1 ? 'bg-red-400' : i <= 2 ? 'bg-amber-400' : i <= 3 ? 'bg-blue-400' : 'bg-emerald-400'
-                            : 'bg-slate-200'
-                        }`} />
-                      ))}
-                    </div>
-                  )
-                }
+            {/* Password with strength checker */}
+            <PasswordStrengthField
+              value={form.password}
+              onChange={v => f('password')(v)}
+              error={errors.password}
+              label="Password"
+              placeholder="Create a strong password"
+              className="mb-3"
+            />
+
+            {/* Confirm Password */}
+            <div>
+              <label className="label">Confirm Password <span className="text-danger-500">*</span></label>
+              <div className="relative">
+                <input
+                  type={showConfirmPw ? 'text' : 'password'}
+                  value={form.confirmPassword}
+                  onChange={e => f('confirmPassword')(e.target.value)}
+                  placeholder="Re-enter password"
+                  autoComplete="new-password"
+                  className={`input w-full pr-9 ${errors.confirmPassword ? 'border-danger-500' : ''}`}
+                />
+                <button type="button" onClick={() => setShowConfirmPw(v => !v)}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 transition-colors">
+                  {showConfirmPw
+                    ? <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                    : <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                  }
+                </button>
               </div>
-              <div>
-                <label className="label">Confirm Password <span className="text-danger-500">*</span></label>
-                <div className="relative">
-                  <input
-                    type={showConfirmPw ? 'text' : 'password'}
-                    value={form.confirmPassword}
-                    onChange={e => f('confirmPassword')(e.target.value)}
-                    placeholder="Re-enter password"
-                    autoComplete="new-password"
-                    className={`input w-full pr-9 ${errors.confirmPassword ? 'border-danger-500' : ''}`}
-                  />
-                  <button type="button" onClick={() => setShowConfirmPw(v => !v)}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 transition-colors">
-                    {showConfirmPw ? <EyeOff size={13} /> : <Eye size={13} />}
-                  </button>
-                </div>
-                {errors.confirmPassword
-                  ? <p className="text-xs text-danger-600 mt-1">{errors.confirmPassword}</p>
-                  : form.confirmPassword && form.password === form.confirmPassword && (
-                    <p className="text-[10px] text-emerald-500 mt-1 flex items-center gap-1">
-                      <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                      Passwords match
-                    </p>
-                  )
-                }
-              </div>
+              {errors.confirmPassword
+                ? <p className="text-xs text-danger-600 mt-1">{errors.confirmPassword}</p>
+                : form.confirmPassword && form.password === form.confirmPassword && (
+                  <p className="text-[10px] text-emerald-500 mt-1 flex items-center gap-1">
+                    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                    Passwords match
+                  </p>
+                )
+              }
             </div>
           </div>
 

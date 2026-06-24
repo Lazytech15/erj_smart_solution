@@ -1,12 +1,12 @@
-import { Bell, HelpCircle, ChevronDown, X, CheckCheck, UserCheck, Clock } from 'lucide-react';
+import { Bell, HelpCircle, ChevronDown, X, CheckCheck, Clock, Menu, LogOut } from 'lucide-react';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { useNotifications } from '../../context/NotificationsContext';
 import { fmt } from '../../utils/dateTime';
 
-export default function Header({ title }) {
-  const { user } = useAuth();
+export default function Header({ title, onMenuClick }) {
+  const { user, logout } = useAuth();
   const navigate = useNavigate();
   const {
     announcements,
@@ -20,6 +20,7 @@ export default function Header({ title }) {
   } = useNotifications();
 
   const [showNotifs, setShowNotifs] = useState(false);
+  const [showProfile, setShowProfile] = useState(false);
 
   const totalBadge = unreadCount + pendingCount;
 
@@ -27,13 +28,11 @@ export default function Header({ title }) {
     ? user.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2)
     : 'U';
 
-  // Click a pending-registration notification → go to Employees and highlight pending section
   function handlePendingClick() {
     setShowNotifs(false);
     navigate('/app/employees', { state: { scrollToPending: true, ts: Date.now() } });
   }
 
-  // Click an announcement → mark read, close panel
   function handleAnnouncementClick(a) {
     if (!a.isRead) markRead(a.id);
     setShowNotifs(false);
@@ -47,13 +46,22 @@ export default function Header({ title }) {
   const hasContent = pendingEmployees.length > 0 || announcements.length > 0;
 
   return (
-    <header className="h-14 flex items-center justify-between px-6 bg-white border-b border-slate-100 shrink-0 gap-4">
+    <header className="h-14 flex items-center justify-between px-4 md:px-6 bg-white border-b border-slate-100 shrink-0 gap-3">
       {/* Left */}
       <div className="flex items-center gap-2 min-w-0">
-        <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-widest">ERJ</span>
-        <span className="text-slate-300 text-sm">/</span>
+        {/* Hamburger — mobile only */}
+        <button
+          onClick={onMenuClick}
+          className="lg:hidden w-8 h-8 flex items-center justify-center rounded-lg text-slate-500 hover:bg-slate-50 transition-colors shrink-0 -ml-1"
+          aria-label="Open menu"
+        >
+          <Menu size={18} />
+        </button>
+
+        <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-widest hidden sm:block">ERJ</span>
+        <span className="text-slate-300 text-sm hidden sm:block">/</span>
         <h1 className="text-sm font-semibold text-slate-800 truncate">{title}</h1>
-        <span className="hidden sm:flex items-center gap-1.5 ml-1">
+        <span className="hidden md:flex items-center gap-1.5 ml-1">
           <span className="w-1 h-1 rounded-full bg-slate-300" />
           <span className="text-xs text-slate-400">{fmt.date(new Date())}</span>
         </span>
@@ -64,7 +72,7 @@ export default function Header({ title }) {
         {/* Bell */}
         <div className="relative">
           <button
-            onClick={() => setShowNotifs(v => !v)}
+            onClick={() => { setShowNotifs(v => !v); setShowProfile(false); }}
             className="relative w-8 h-8 flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-50 transition-colors"
           >
             <Bell size={15} />
@@ -78,7 +86,7 @@ export default function Header({ title }) {
           {showNotifs && (
             <>
               <div className="fixed inset-0 z-40" onClick={() => setShowNotifs(false)} />
-              <div className="absolute right-0 top-11 w-[340px] bg-white rounded-xl shadow-lg shadow-slate-200/60 border border-slate-100 z-50 overflow-hidden">
+              <div className="absolute right-0 top-11 w-[calc(100vw-2rem)] max-w-[340px] bg-white rounded-xl shadow-lg shadow-slate-200/60 border border-slate-100 z-50 overflow-hidden">
 
                 {/* Panel header */}
                 <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
@@ -106,8 +114,6 @@ export default function Header({ title }) {
                 </div>
 
                 <div className="max-h-80 overflow-y-auto">
-
-                  {/* ── Pending registrations section ── */}
                   {pendingEmployees.length > 0 && (
                     <div>
                       <div className="px-4 pt-3 pb-1.5">
@@ -126,7 +132,6 @@ export default function Header({ title }) {
                             onClick={handlePendingClick}
                             className="group px-4 py-3 cursor-pointer hover:bg-amber-50/60 transition-colors flex items-start gap-3 border-b border-slate-50 last:border-b-0"
                           >
-                            {/* Avatar */}
                             <div className="w-7 h-7 rounded-full bg-gradient-to-br from-amber-400 to-orange-500 flex items-center justify-center text-white text-[10px] font-bold shrink-0 mt-0.5">
                               {initials2}
                             </div>
@@ -156,7 +161,6 @@ export default function Header({ title }) {
                     </div>
                   )}
 
-                  {/* ── Announcements section ── */}
                   {announcements.length > 0 && (
                     <div>
                       {pendingEmployees.length > 0 && (
@@ -202,7 +206,6 @@ export default function Header({ title }) {
                     </div>
                   )}
 
-                  {/* Empty state */}
                   {!loadingNotifs && !hasContent && (
                     <div className="px-4 py-8 text-center">
                       <Bell size={20} className="text-slate-200 mx-auto mb-2" />
@@ -219,13 +222,46 @@ export default function Header({ title }) {
           <HelpCircle size={15} />
         </button>
 
-        {/* Avatar */}
-        <div className="flex items-center gap-2 ml-2 pl-2 border-l border-slate-100">
-          <div className="w-7 h-7 rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center text-white text-[10px] font-bold shrink-0">
-            {initials}
-          </div>
-          <span className="hidden sm:block text-xs font-medium text-slate-700 max-w-[80px] truncate">{user?.name || 'User'}</span>
-          <ChevronDown size={11} className="hidden sm:block text-slate-300" />
+        {/* Avatar + profile dropdown */}
+        <div className="relative ml-2 pl-2 border-l border-slate-100">
+          <button
+            onClick={() => { setShowProfile(v => !v); setShowNotifs(false); }}
+            className="flex items-center gap-2 rounded-lg px-1.5 py-1 hover:bg-slate-50 transition-colors"
+          >
+            <div className="w-7 h-7 rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center text-white text-[10px] font-bold shrink-0">
+              {initials}
+            </div>
+            <span className="hidden sm:block text-xs font-medium text-slate-700 max-w-[80px] truncate">{user?.name || 'User'}</span>
+            <ChevronDown
+              size={11}
+              className="hidden sm:block text-slate-300 transition-transform duration-200"
+              style={{ transform: showProfile ? 'rotate(180deg)' : 'rotate(0deg)' }}
+            />
+          </button>
+
+          {showProfile && (
+            <>
+              <div className="fixed inset-0 z-40" onClick={() => setShowProfile(false)} />
+              <div
+                className="absolute right-0 top-10 z-50 w-48 bg-white rounded-xl border border-slate-100 overflow-hidden"
+                style={{ boxShadow: '0 8px 24px rgba(0,0,0,0.10), 0 1px 4px rgba(0,0,0,0.06)' }}
+              >
+                {/* User info */}
+                <div className="px-4 py-3 border-b border-slate-100">
+                  <p className="text-xs font-semibold text-slate-800 truncate">{user?.name || 'User'}</p>
+                  <p className="text-[11px] text-slate-400 truncate mt-0.5">{user?.email || user?.role || ''}</p>
+                </div>
+                {/* Logout */}
+                <button
+                  onClick={() => { setShowProfile(false); logout(); navigate('/login'); }}
+                  className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm font-medium text-red-500 hover:bg-red-50 transition-colors"
+                >
+                  <LogOut size={14} />
+                  Log Out
+                </button>
+              </div>
+            </>
+          )}
         </div>
       </div>
     </header>

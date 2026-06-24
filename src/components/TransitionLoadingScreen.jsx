@@ -23,9 +23,11 @@ const styles = {
     zIndex: 9999,
     fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
     animation: "tls-fadein 0.18s ease",
+    padding: "0 24px",
   },
   inner: {
-    width: 560,
+    // max 560px, full width minus the 24px side padding in root
+    width: "min(560px, 100%)",
     display: "flex",
     flexDirection: "column",
     alignItems: "center",
@@ -38,12 +40,12 @@ const styles = {
     marginBottom: 14,
   },
   label: {
-    fontSize: 15,
+    fontSize: "clamp(13px, 2.5vw, 15px)",
     color: "#7B8490",
     letterSpacing: "0.3px",
   },
   pct: {
-    fontSize: 15,
+    fontSize: "clamp(13px, 2.5vw, 15px)",
     fontWeight: 600,
     color: "#2563EB",
     fontVariantNumeric: "tabular-nums",
@@ -75,11 +77,6 @@ const styles = {
   },
 };
 
-/**
- * Stage definitions: [minProgress, maxProgress, label]
- * The bar animates freely through stages until it hits WAIT_AT.
- * Once `promise` resolves it races to 100% and fires onComplete.
- */
 const STAGES = [
   [0,  30, "Signing you in…"],
   [30, 60, "Loading your workspace…"],
@@ -87,10 +84,6 @@ const STAGES = [
   [85, 100, "Ready!"],
 ];
 
-/**
- * The bar will animate freely up to this point, then pause and wait
- * for the `promise` prop to resolve before continuing to 100%.
- */
 const WAIT_AT = 70;
 
 const getStageLabel = (p) =>
@@ -102,9 +95,6 @@ const getStageLabel = (p) =>
  * Props:
  *   label      – initial status text (overridden by stage labels as progress advances)
  *   promise    – optional Promise to wait for before the bar completes.
- *                The bar animates freely to WAIT_AT%, then pauses until the
- *                promise resolves, then races to 100% and calls onComplete.
- *                Without a promise the bar runs straight through to 100%.
  *   onComplete – called after the bar reaches 100% and a short pause elapses.
  */
 export default function TransitionLoadingScreen({ label = "Loading…", promise, onComplete }) {
@@ -115,10 +105,8 @@ export default function TransitionLoadingScreen({ label = "Loading…", promise,
   const timerRef    = useRef(null);
   const doneRef     = useRef(false);
   const progressRef = useRef(0);
-  // True once the promise has resolved (or if no promise was given)
   const readyRef    = useRef(!promise);
 
-  // useLayoutEffect keeps these refs current before any RAF tick reads them
   const onCompleteRef = useRef(onComplete);
   useLayoutEffect(() => { onCompleteRef.current = onComplete; });
 
@@ -126,16 +114,14 @@ export default function TransitionLoadingScreen({ label = "Loading…", promise,
   useLayoutEffect(() => { promiseRef.current = promise; });
 
   useEffect(() => {
-    // Reset — handles React StrictMode double-invoke
     doneRef.current   = false;
     progressRef.current = 0;
     readyRef.current  = !promiseRef.current;
 
-    // Watch the promise and flip readyRef when it settles
     if (promiseRef.current) {
       promiseRef.current
         .then(() => { readyRef.current = true; })
-        .catch(() => { readyRef.current = true; }); // still proceed on error
+        .catch(() => { readyRef.current = true; });
     }
 
     const tick = () => {
@@ -143,15 +129,11 @@ export default function TransitionLoadingScreen({ label = "Loading…", promise,
 
       const p = progressRef.current;
 
-      // Determine speed:
-      // - Before WAIT_AT: animate freely (slowing as we approach the hold point)
-      // - At/past WAIT_AT and waiting: creep very slowly (shows progress, not stuck)
-      // - Once ready: race to 100%
       let speed;
       if (readyRef.current) {
-        speed = p < 95 ? 1.2 : 0.5; // fast finish once data is ready
+        speed = p < 95 ? 1.2 : 0.5;
       } else if (p >= WAIT_AT) {
-        speed = 0.04; // barely moving — visually "waiting" without freezing
+        speed = 0.04;
       } else {
         speed = p < 40 ? 0.7 : p < 60 ? 0.45 : 0.25;
       }

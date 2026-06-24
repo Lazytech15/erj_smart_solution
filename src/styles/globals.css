@@ -243,3 +243,16 @@
   opacity: 0;
   pointer-events: none;
 }
+
+/* ─── Mobile Responsive Utilities ─────────────────────────────────────────── */
+/* Tables that need horizontal scroll on small screens */
+.table-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+/* Cards/pages get less padding on mobile */
+@media (max-width: 640px) {
+  .card {
+    padding: 1rem;
+  }
+}

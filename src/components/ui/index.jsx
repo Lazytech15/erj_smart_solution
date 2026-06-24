@@ -172,12 +172,12 @@ export function InputField({ label, type = 'text', value, onChange, placeholder,
 // ─── Section Header ──────────────────────────────────────────────────────────
 export function SectionHeader({ title, description, actions }) {
   return (
-    <div className="section-header">
-      <div>
+    <div className="flex flex-wrap items-start justify-between gap-3">
+      <div className="min-w-0">
         <h2 className="page-title">{title}</h2>
         {description && <p className="text-sm text-ink-400 mt-0.5">{description}</p>}
       </div>
-      {actions && <div className="flex items-center gap-2">{actions}</div>}
+      {actions && <div className="flex items-center gap-2 shrink-0">{actions}</div>}
     </div>
   );
 }

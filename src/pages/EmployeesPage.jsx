@@ -1546,7 +1546,7 @@ function EmployeeAnalyticsModal({ open, onClose, employee, attendance, shifts })
         </div>
 
         {/* ── Stat cards ── */}
-        <div className="grid grid-cols-5 gap-2">
+        <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
           {[
             { label: 'Present',  value: summary.present,      color: '#10b981', bg: '#f0fdf4', icon: <CheckCircle size={14} /> },
             { label: 'Late',     value: summary.late,         color: '#f59e0b', bg: '#fffbeb', icon: <Clock size={14} /> },

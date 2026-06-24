@@ -11,6 +11,7 @@ const styles = {
     justifyContent: "center",
     zIndex: 9999,
     fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+    padding: "0 24px",
   },
   logoWrap: {
     display: "flex",
@@ -20,9 +21,10 @@ const styles = {
     marginBottom: 56,
   },
   logoIcon: {
-    width: 120,
-    height: 120,
-    borderRadius: 28,
+    // clamp: min 80px, preferred 15vw, max 120px
+    width: "clamp(80px, 15vw, 120px)",
+    height: "clamp(80px, 15vw, 120px)",
+    borderRadius: "clamp(18px, 3vw, 28px)",
     overflow: "hidden",
     background: "#fff",
     border: "1px solid rgba(0,0,0,0.08)",
@@ -31,10 +33,11 @@ const styles = {
     alignItems: "center",
     justifyContent: "center",
     animation: "logoBreath 2.8s ease-in-out infinite",
+    flexShrink: 0,
   },
   logoImg: {
-    width: 100,
-    height: 100,
+    width: "83%",
+    height: "83%",
     objectFit: "contain",
   },
   brand: {
@@ -44,17 +47,21 @@ const styles = {
     gap: 6,
   },
   brandName: {
-    fontSize: 30,
+    // clamp: min 20px, preferred 5vw, max 30px
+    fontSize: "clamp(20px, 5vw, 30px)",
     fontWeight: 700,
     letterSpacing: "-0.4px",
     color: "#1A1A2E",
+    textAlign: "center",
   },
   brandSub: {
-    fontSize: 14,
+    // clamp: min 11px, preferred 2.5vw, max 14px
+    fontSize: "clamp(11px, 2.5vw, 14px)",
     fontWeight: 400,
     letterSpacing: "3px",
     textTransform: "uppercase",
     color: "#7B8490",
+    textAlign: "center",
   },
   divider: {
     width: 1,
@@ -63,7 +70,8 @@ const styles = {
     margin: "4px 0 28px",
   },
   progressWrap: {
-    width: 520,
+    // max 520px, full width with 24px side padding accounted for by root
+    width: "min(520px, 100%)",
     display: "flex",
     flexDirection: "column",
     alignItems: "center",
@@ -82,7 +90,6 @@ const styles = {
     width: "0%",
     background: "linear-gradient(90deg, #1D4ED8, #2563EB, #3B82F6)",
     borderRadius: 99,
-    // No CSS transition — RAF writes width directly each frame
     boxShadow: "0 0 10px rgba(37,99,235,0.4)",
   },
   statusRow: {
@@ -92,12 +99,12 @@ const styles = {
     width: "100%",
   },
   statusText: {
-    fontSize: 14,
+    fontSize: "clamp(12px, 2.5vw, 14px)",
     color: "#7B8490",
     letterSpacing: "0.3px",
   },
   pct: {
-    fontSize: 14,
+    fontSize: "clamp(12px, 2.5vw, 14px)",
     fontWeight: 600,
     color: "#2563EB",
     fontVariantNumeric: "tabular-nums",
@@ -125,6 +132,12 @@ const keyframes = `
     0%, 100% { background: #CBD1D9; transform: scale(1); }
     50%       { background: #2563EB; transform: scale(1.35); }
   }
+
+  /* Extra-small screens: tighten vertical spacing */
+  @media (max-height: 500px) {
+    .ls-logoWrap  { margin-bottom: 24px !important; gap: 12px !important; }
+    .ls-divider   { height: 28px !important; margin: 2px 0 16px !important; }
+  }
 `;
 
 /**
@@ -133,11 +146,6 @@ const keyframes = `
  * Props:
  *   label      – fallback status text shown before the stage messages kick in
  *   onComplete – called once the bar reaches 100% and a short pause elapses
- *
- * Behaviour:
- *   • The bar runs forward through stages and reaches 100%.
- *   • After 400 ms at 100% it calls onComplete (if provided).
- *   • If onComplete is not provided the bar stays at 100% indefinitely.
  */
 export default function LoadingScreen({ label = "Initializing...", onComplete }) {
   const fillRef       = useRef(null);
@@ -160,11 +168,9 @@ export default function LoadingScreen({ label = "Initializing...", onComplete })
   const getStatus = (p) =>
     stages.find(([min, max]) => p >= min && p < max)?.[2] ?? "Done!";
 
-  // Keep ref current without restarting the animation effect
   useEffect(() => { onCompleteRef.current = onComplete; });
 
   useEffect(() => {
-    // Reset state in case React StrictMode unmounted + remounted this component
     doneRef.current = false;
     progressRef.current = 2;
 
@@ -196,13 +202,13 @@ export default function LoadingScreen({ label = "Initializing...", onComplete })
       cancelAnimationFrame(rafRef.current);
       doneRef.current = true;
     };
-  }, []); // empty — animation runs exactly once, start to finish
+  }, []);
 
   return (
     <>
       <style>{keyframes}</style>
       <div style={styles.root}>
-        <div style={styles.logoWrap}>
+        <div className="ls-logoWrap" style={styles.logoWrap}>
           <div style={styles.logoIcon}>
             <img src="/logo.svg" alt="ERJ Smart Solution" style={styles.logoImg} />
           </div>
@@ -212,7 +218,7 @@ export default function LoadingScreen({ label = "Initializing...", onComplete })
           </div>
         </div>
 
-        <div style={styles.divider} />
+        <div className="ls-divider" style={styles.divider} />
 
         <div style={styles.progressWrap}>
           <div style={styles.barTrack}>

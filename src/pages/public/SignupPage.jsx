@@ -5,6 +5,7 @@ import { PLANS, useSubscription } from '../../context/SubscriptionContext';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { Spinner } from '../../components/ui';
+import PasswordStrengthField, { isPasswordStrong } from '../../components/PasswordStrengthField';
 
 const INDUSTRIES = ['Technology','Healthcare','Finance & Banking','Manufacturing','Retail','Education','Logistics','Construction','Media & Entertainment','Other'];
 const COMPANY_SIZES = ['1–10','11–50','51–200','201–500','501–1,000','1,000+'];
@@ -185,7 +186,6 @@ export default function SignupPage() {
 
   const [step, setStep] = useState(0);
   const [loading, setLoading] = useState(false);
-  const [showPw, setShowPw] = useState(false);
   const [agreedToTerms, setAgreedToTerms] = useState(false);
   const [legalModal, setLegalModal] = useState(null); // 'terms' | 'privacy' | null
 
@@ -208,7 +208,8 @@ export default function SignupPage() {
     if (step === 1) {
       if (!account.adminName.trim()) e.adminName = 'Your name is required';
       if (!account.adminEmail.includes('@')) e.adminEmail = 'Valid email required';
-      if (account.password.length < 8) e.password = 'Minimum 8 characters';
+      if (!account.password) e.password = 'Password is required';
+      else if (!isPasswordStrong(account.password)) e.password = 'Password does not meet all requirements';
       if (account.password !== account.confirmPassword) e.confirmPassword = 'Passwords do not match';
     }
     if (step === 2 && !isTrialPlan) {
@@ -470,24 +471,30 @@ export default function SignupPage() {
                       value={account.adminEmail} onChange={e => af('adminEmail')(e.target.value)} placeholder="maria@company.com" />
                     {errors.adminEmail && <p className={errorClass}>{errors.adminEmail}</p>}
                   </div>
-                  <div>
-                    <label className={labelClass}>Password</label>
-                    <div className="relative">
-                      <input type={showPw ? 'text' : 'password'}
-                        className={`${inputClass} pr-10 ${errors.password ? 'border-red-400' : ''}`}
-                        value={account.password} onChange={e => af('password')(e.target.value)} placeholder="Min. 8 characters" />
-                      <button type="button" onClick={() => setShowPw(v => !v)}
-                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-300 hover:text-slate-600 transition-colors">
-                        {showPw ? <EyeOff size={15} /> : <Eye size={15} />}
-                      </button>
-                    </div>
-                    {errors.password && <p className={errorClass}>{errors.password}</p>}
-                  </div>
+
+                  {/* Password with strength checker */}
+                  <PasswordStrengthField
+                    variant="signup"
+                    value={account.password}
+                    onChange={v => af('password')(v)}
+                    error={errors.password}
+                    label="Password"
+                    placeholder="Create a strong password"
+                  />
+
+                  {/* Confirm Password */}
                   <div>
                     <label className={labelClass}>Confirm Password</label>
                     <input type="password" className={`${inputClass} ${errors.confirmPassword ? 'border-red-400' : ''}`}
                       value={account.confirmPassword} onChange={e => af('confirmPassword')(e.target.value)} placeholder="Re-enter password" />
-                    {errors.confirmPassword && <p className={errorClass}>{errors.confirmPassword}</p>}
+                    {errors.confirmPassword
+                      ? <p className={errorClass}>{errors.confirmPassword}</p>
+                      : account.confirmPassword && account.password === account.confirmPassword && (
+                        <p className="text-[10px] text-emerald-500 mt-1 flex items-center gap-1">
+                          <Check size={9} strokeWidth={3} /> Passwords match
+                        </p>
+                      )
+                    }
                   </div>
                 </div>
               )}
