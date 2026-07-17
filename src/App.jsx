@@ -34,7 +34,7 @@ import SuperAdminPage from './pages/SuperAdminPage';
  */
 function PrivateRoute({ children }) {
   const { user, authReady } = useAuth();
-  const { subscription, loading } = useSubscription();
+  const { subscription, loading, trialDaysLeft } = useSubscription();
   const location = useLocation();
 
   // Wait for the Supabase Auth session to be resolved before making a decision
@@ -44,6 +44,12 @@ function PrivateRoute({ children }) {
   if (!subscription) return <Navigate to="/pricing" replace />;
 
   if (subscription.status === 'cancelled' && location.pathname !== '/app/subscription') {
+    return <Navigate to="/app/subscription" replace />;
+  }
+
+  // Trial expired — everything except Subscription & Billing is locked until
+  // the client activates a paid plan.
+  if (subscription.status === 'trialing' && trialDaysLeft <= 0 && location.pathname !== '/app/subscription') {
     return <Navigate to="/app/subscription" replace />;
   }
 

@@ -96,7 +96,7 @@ export function EmptyState({ icon: Icon = AlertCircle, title, description, actio
 }
 
 // ─── Stat Card ───────────────────────────────────────────────────────────────
-export function StatCard({ label, value, sub, icon: Icon, color = 'brand', trend }) {
+export function StatCard({ label, value, sub, icon: Icon, color = 'brand', trend, onClick }) {
   const colors = {
     brand:   { bg: 'bg-brand-50',   text: 'text-brand-600'   },
     success: { bg: 'bg-success-50', text: 'text-success-600' },
@@ -106,8 +106,13 @@ export function StatCard({ label, value, sub, icon: Icon, color = 'brand', trend
     neutral: { bg: 'bg-surface-100',text: 'text-ink-500'     },
   };
   const c = colors[color] || colors.brand;
+  const Wrapper = onClick ? 'button' : 'div';
   return (
-    <div className="stat-card">
+    <Wrapper
+      type={onClick ? 'button' : undefined}
+      onClick={onClick}
+      className={`stat-card${onClick ? ' text-left w-full cursor-pointer transition-shadow hover:shadow-md hover:border-brand-200 focus:outline-none focus:ring-2 focus:ring-brand-200' : ''}`}
+    >
       <div className="flex items-start justify-between">
         <div className={`w-9 h-9 rounded-lg flex items-center justify-center ${c.bg}`}>
           {Icon && <Icon size={17} className={c.text} />}
@@ -123,7 +128,8 @@ export function StatCard({ label, value, sub, icon: Icon, color = 'brand', trend
         <p className="text-xs font-medium text-ink-500 mt-0.5">{label}</p>
         {sub && <p className="text-[11px] text-ink-300 mt-0.5">{sub}</p>}
       </div>
-    </div>
+
+    </Wrapper>
   );
 }
 

@@ -39,7 +39,16 @@ const PLAN_CONFIG = {
       'Attendance records',
       'Basic leave management',
       'CSV export',
+      'Email support',
+      'Mobile App Clock-In (GPS + QR Shift Scan)',
+      'Desktop Kiosk (Electron App)',
+      'Barcode / QR ID Badge Support',
       'Shift management',
+      'Department management',
+      'Analytics & reports',
+      'Overtime tracking',
+      'SMS notifications',
+      'Priority support',
     ]),
   },
   starter: {
@@ -140,6 +149,9 @@ export default function PricingPage() {
   const navigate = useNavigate();
   const [hoveredPlan, setHoveredPlan] = useState(null);
 
+  const paidPlans = PLANS.filter(p => p.id !== 'free_trial');
+  const trialPlan = PLANS.find(p => p.id === 'free_trial');
+
   return (
     <div className="min-h-screen flex flex-col" style={{ background: '#eef0f4', fontFamily: "'Inter', system-ui, sans-serif" }}>
       {/* Nav */}
@@ -167,11 +179,11 @@ export default function PricingPage() {
         </div>
 
         {/* Plan cards */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-5 w-full max-w-6xl">
-          {PLANS.map(plan => {
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-5 w-full max-w-5xl">
+          {paidPlans.map(plan => {
             const cfg = PLAN_CONFIG[plan.id];
             const isHovered = hoveredPlan === plan.id;
-            const isFree = plan.id === 'free_trial';
+            const isGrowth = plan.id === 'growth';
             return (
               <div
                 key={plan.id}
@@ -182,17 +194,13 @@ export default function PricingPage() {
                   background: 'white',
                   boxShadow: isHovered ? `0 12px 40px ${cfg.colorShadow}, 0 2px 8px rgba(0,0,0,0.08)` : '0 2px 12px rgba(0,0,0,0.07)',
                   transform: isHovered ? 'translateY(-6px)' : 'none',
-                  outline: isFree ? `2px dashed ${cfg.color}55` : 'none',
+                  outline: isGrowth ? `2px solid ${cfg.color}55` : 'none',
                 }}
               >
                 {/* Colored banner */}
                 <div
                   className="px-5 py-4 text-white text-center relative"
-                  style={{
-                    background: isFree
-                      ? `repeating-linear-gradient(135deg, ${cfg.color} 0px, ${cfg.color} 10px, ${cfg.colorDark} 10px, ${cfg.colorDark} 20px)`
-                      : `linear-gradient(135deg, ${cfg.color} 0%, ${cfg.colorDark} 100%)`,
-                  }}
+                  style={{ background: `linear-gradient(135deg, ${cfg.color} 0%, ${cfg.colorDark} 100%)` }}
                 >
                   {plan.badge && (
                     <div className="absolute -top-1 -right-1 px-2.5 py-1 text-[10px] font-black uppercase rounded-bl-xl rounded-tr-xl"
@@ -203,25 +211,23 @@ export default function PricingPage() {
                   <p className="font-black text-base uppercase tracking-widest">{plan.name} Plan</p>
                 </div>
 
+                {/* Trial callout — Growth only */}
+                {isGrowth && (
+                  <div className="px-5 py-2.5 flex items-center gap-1.5 justify-center text-[11px] font-semibold" style={{ background: cfg.colorLight, color: cfg.colorDark }}>
+                    <Zap size={11} /> Includes a free 14-day trial of everything below
+                  </div>
+                )}
+
                 {/* Price */}
                 <div className="flex flex-col items-center pt-5 pb-3 px-5">
-                  {isFree ? (
-                    <>
-                      <span className="text-4xl font-black" style={{ color: cfg.color }}>Free</span>
-                      <span className="text-xs text-slate-400 mt-0.5">14-day trial · no card needed</span>
-                    </>
-                  ) : (
-                    <>
-                      {cfg.originalPrice && (
-                        <div className="flex items-center gap-2 mb-0.5">
-                          <span className="text-xs text-slate-400 line-through">₱{cfg.originalPrice}</span>
-                          <span className="px-1.5 py-0.5 rounded text-[10px] font-bold text-white" style={{ background: cfg.color }}>{cfg.discount}</span>
-                        </div>
-                      )}
-                      <span className="text-4xl font-black" style={{ color: cfg.color }}>₱{plan.price}</span>
-                      <span className="text-xs text-slate-400 mt-0.5">/ employee / month</span>
-                    </>
+                  {cfg.originalPrice && (
+                    <div className="flex items-center gap-2 mb-0.5">
+                      <span className="text-xs text-slate-400 line-through">₱{cfg.originalPrice}</span>
+                      <span className="px-1.5 py-0.5 rounded text-[10px] font-bold text-white" style={{ background: cfg.color }}>{cfg.discount}</span>
+                    </div>
                   )}
+                  <span className="text-4xl font-black" style={{ color: cfg.color }}>₱{plan.price}</span>
+                  <span className="text-xs text-slate-400 mt-0.5">/ employee / month</span>
                 </div>
 
                 <div className="mx-5 h-px" style={{ background: '#f1f5f9' }} />
@@ -260,16 +266,23 @@ export default function PricingPage() {
                 {/* CTA */}
                 <div className="px-5 pb-5">
                   <button
-                    onClick={() => navigate(`/signup?plan=${plan.id}`)}
+                    onClick={() => navigate(`/signup?plan=${isGrowth ? trialPlan.id : plan.id}`)}
                     className="w-full py-2.5 rounded-xl text-xs font-bold uppercase tracking-widest text-white transition-all duration-150"
                     style={{
                       background: `linear-gradient(135deg, ${cfg.color} 0%, ${cfg.colorDark} 100%)`,
                       boxShadow: isHovered ? `0 4px 14px ${cfg.colorShadow}` : 'none',
-                      border: isFree ? `1.5px solid ${cfg.colorDark}` : 'none',
                     }}
                   >
-                    {isFree ? '🚀 Start Free Trial' : 'Subscribe'}
+                    {isGrowth ? '🚀 Start Free Trial' : 'Subscribe'}
                   </button>
+                  {isGrowth && (
+                    <button
+                      onClick={() => navigate(`/signup?plan=${plan.id}`)}
+                      className="w-full mt-2 text-[11px] font-semibold text-slate-400 hover:text-slate-600 transition-colors"
+                    >
+                      or subscribe directly →
+                    </button>
+                  )}
                 </div>
               </div>
             );
@@ -277,7 +290,7 @@ export default function PricingPage() {
         </div>
 
         <p className="mt-8 text-xs text-slate-400 text-center">
-          Free Trial: 14 days, no credit card · Starter, Growth &amp; Enterprise activate immediately
+          Free trial gives full Growth-plan access for 14 days, no credit card · Starter &amp; Enterprise activate immediately
         </p>
 
         {/* FAQ */}

@@ -71,7 +71,7 @@ export default function SettingsPage() {
 
   const planId    = subscription?.planId ?? 'free_trial';
   const planIndex = PLAN_ORDER.indexOf(planId);
-  const hasGrowth      = planIndex >= PLAN_ORDER.indexOf('growth');
+  const hasGrowth      = planId === 'free_trial' || planIndex >= PLAN_ORDER.indexOf('growth');
   const hasEnterprise  = planIndex >= PLAN_ORDER.indexOf('enterprise');
   const hasEmailNotifs = currentPlan?.limits?.emailNotifs === true;
   const hasSmsNotifs   = currentPlan?.limits?.sms === true;
@@ -336,8 +336,6 @@ export default function SettingsPage() {
             <p className="text-xs text-ink-400 mt-0.5">
               {hasGrowth
                 ? 'Upgrade to Enterprise to unlock API access, biometric sync, and payload encryption.'
-                : planId === 'free_trial'
-                ? 'Upgrade to Starter or higher to unlock email notifications, mobile clock-in, and more.'
                 : 'Upgrade to Growth or Enterprise to unlock geo-fencing, SMS alerts, biometric sync, and API access.'}
             </p>
           </div>

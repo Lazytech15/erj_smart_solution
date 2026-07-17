@@ -146,10 +146,10 @@ function EmployeeDashboard({ user, subscription, navigate }) {
 
       {/* This month stats */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <StatCard label="Present This Month"  value={presentDays} icon={CheckCircle} color="success" />
-        <StatCard label="Late This Month"     value={lateDays}    icon={Timer}       color="warning" />
-        <StatCard label="Absent This Month"   value={absentDays}  icon={UserX}       color="danger"  />
-        <StatCard label="Pending Leave"       value={pendingLeave} icon={CalendarCheck} color="info" />
+        <StatCard label="Present This Month"  value={presentDays} icon={CheckCircle} color="success" onClick={() => navigate('/app/attendance?status=present')} />
+        <StatCard label="Late This Month"     value={lateDays}    icon={Timer}       color="warning" onClick={() => navigate('/app/attendance?status=late')} />
+        <StatCard label="Absent This Month"   value={absentDays}  icon={UserX}       color="danger"  onClick={() => navigate('/app/attendance?status=absent')} />
+        <StatCard label="Pending Leave"       value={pendingLeave} icon={CalendarCheck} color="info" onClick={() => navigate('/app/leave?status=pending')} />
       </div>
 
       {/* Attendance trend + Leave balance */}
@@ -351,10 +351,10 @@ function AdminDashboard({ user, can, subscription, currentPlan, seatsUsed, navig
       ) : (
         <>
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-            <StatCard label="Total Employees" value={activeEmployees.length} icon={Users}        color="brand"   />
-            <StatCard label="Present Today"   value={presentToday}          icon={UserCheck}     color="success" />
-            <StatCard label="Late Today"      value={lateToday}             icon={Timer}         color="warning" />
-            <StatCard label="Pending Leave"   value={pendingLeave}          icon={CalendarCheck} color="info"    />
+            <StatCard label="Total Employees" value={activeEmployees.length} icon={Users}        color="brand"   onClick={() => navigate('/app/employees')} />
+            <StatCard label="Present Today"   value={presentToday}          icon={UserCheck}     color="success" onClick={() => navigate('/app/attendance?status=present')} />
+            <StatCard label="Late Today"      value={lateToday}             icon={Timer}         color="warning" onClick={() => navigate('/app/attendance?status=late')} />
+            <StatCard label="Pending Leave"   value={pendingLeave}          icon={CalendarCheck} color="info"    onClick={() => navigate('/app/leave?status=pending')} />
           </div>
 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">

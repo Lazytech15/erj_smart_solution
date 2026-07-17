@@ -563,7 +563,7 @@ function ShiftsContent() {
       />
 
       {shifts.length === 0 ? (
-        <EmptyState icon={<Clock size={24} />} title="No shifts yet" description="Define work shifts for your employees." />
+        <EmptyState icon={Clock} title="No shifts yet" description="Define work shifts for your employees." />
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           {shifts.map(shift => {

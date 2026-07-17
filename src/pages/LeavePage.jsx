@@ -1,4 +1,5 @@
 import { useState, useMemo } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { format, differenceInCalendarDays } from 'date-fns';
 import { Plus, CalendarDays, Pencil, X, Check, Ban, Download, Settings2, Trash2, Wallet, AlertTriangle } from 'lucide-react';
 import { useSubscription } from '../context/SubscriptionContext';
@@ -51,9 +52,13 @@ export default function LeavePage() {
   const leaveRequests = subscription?.leaveRequests || [];
   const leaveTypes   = subscription?.settings?.leaveTypes || [];
 
+  const [searchParams] = useSearchParams();
+  const initialStatus = searchParams.get('status');
+  const LEAVE_STATUSES = ['pending', 'approved', 'rejected'];
+
   const [tab, setTab] = useState('requests');
   const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState('all');
+  const [statusFilter, setStatusFilter] = useState(LEAVE_STATUSES.includes(initialStatus) ? initialStatus : 'all');
   const [addModal, setAddModal] = useState(false);
   const [editTarget, setEditTarget] = useState(null);
   const [cancelTarget, setCancelTarget] = useState(null);

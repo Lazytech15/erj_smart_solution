@@ -71,6 +71,7 @@ export default function SubscriptionPage() {
   const isCancelled = subscription.status === 'cancelled';
 
   function handleSelectPlan(planId) {
+    if (planId === 'free_trial' && subscription.hasUsedTrial) return; // trial already consumed
     const targetIdx = PLAN_ORDER.indexOf(planId);
     setSelectedPlan(planId);
     // Show upgrade benefits if going up, no preview if same/down
@@ -270,9 +271,11 @@ export default function SubscriptionPage() {
         }
       >
         <div className="space-y-4">
-          {/* Plan picker */}
+          {/* Plan picker — free_trial is excluded once the account has already
+              used its one-time trial, so it can never be re-selected after
+              it expires or the client moves to a paid plan. */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            {PLANS.map(p => {
+            {PLANS.filter(p => p.id !== 'free_trial' || !subscription.hasUsedTrial).map(p => {
               const isCurrent = p.id === subscription.planId;
               const isPicked  = selectedPlan === p.id;
               const pidx      = PLAN_ORDER.indexOf(p.id);

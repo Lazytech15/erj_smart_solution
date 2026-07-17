@@ -102,49 +102,69 @@ export function AuthProvider({ children }) {
    * 2. Inserts a profile row in `accounts` linking auth_uid → role/name/subscription.
    */
   const registerCompanyAdmin = useCallback(async ({ adminName, adminEmail, password, subscriptionId }) => {
-    // 1. Create the Supabase Auth user.
-    //    signUp() returns the user immediately even when email confirmation is
-    //    enabled, but the session will be null until confirmed. We handle both
-    //    cases so this works regardless of your Supabase email settings.
-    const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
-      email:    adminEmail,
-      password: password,
-      options: { data: { name: adminName } },
-    });
-    if (signUpError) throw new Error(signUpError.message);
+    // Block the onAuthStateChange SIGNED_IN listener from the very start.
+    // signUp()/signInWithPassword() below establish the Supabase session (and
+    // fire SIGNED_IN) internally before their own promises resolve to us —
+    // i.e. before the accounts row is even inserted. If pendingUserRef were
+    // only set at the end (after insert), the listener's guard would still
+    // be open during that window, fetch a profile that doesn't exist yet,
+    // and setUser() a bogus admin (subscriptionId: null). Since `subscribe()`
+    // already set an active subscription by this point, that premature user
+    // makes PublicRoute redirect straight to /app/dashboard, skipping
+    // /onboard entirely. A sentinel here keeps the guard closed the whole time.
+    pendingUserRef.current = true;
 
-    const authUid = signUpData.user?.id;
-    if (!authUid) throw new Error('Sign-up succeeded but no user ID was returned.');
-
-    // 2. Insert profile row — authUid is always available even before confirmation.
-    const { error: profileError } = await supabase.from('accounts').insert({
-      auth_uid:        authUid,
-      email:           adminEmail,
-      role:            'admin',
-      name:            adminName,
-      employee_id:     null,
-      subscription_id: subscriptionId,
-    });
-    if (profileError) throw new Error(profileError.message);
-
-    // 3. If Supabase returned a live session (email confirmation disabled),
-    //    we are already signed in. If the session is null (confirmation email
-    //    was sent), sign in with password immediately so onboarding can
-    //    continue without forcing the admin to check their inbox first.
-    if (!signUpData.session) {
-      const { error: signInError } = await supabase.auth.signInWithPassword({
+    let safe;
+    try {
+      // 1. Create the Supabase Auth user.
+      //    signUp() returns the user immediately even when email confirmation is
+      //    enabled, but the session will be null until confirmed. We handle both
+      //    cases so this works regardless of your Supabase email settings.
+      const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
         email:    adminEmail,
         password: password,
+        options: { data: { name: adminName } },
       });
-      if (signInError) {
-        // Supabase is strictly blocking unconfirmed logins — surface a clear message.
-        throw new Error(
-          'Account created — please check your email to confirm your address before signing in.',
-        );
-      }
-    }
+      if (signUpError) throw new Error(signUpError.message);
 
-    const safe = { id: authUid, email: adminEmail, role: 'admin', name: adminName, employeeId: null, subscriptionId, createdAt: new Date().toISOString() };
+      const authUid = signUpData.user?.id;
+      if (!authUid) throw new Error('Sign-up succeeded but no user ID was returned.');
+
+      // 2. Insert profile row — authUid is always available even before confirmation.
+      const { error: profileError } = await supabase.from('accounts').insert({
+        auth_uid:        authUid,
+        email:           adminEmail,
+        role:            'admin',
+        name:            adminName,
+        employee_id:     null,
+        subscription_id: subscriptionId,
+      });
+      if (profileError) throw new Error(profileError.message);
+
+      // 3. If Supabase returned a live session (email confirmation disabled),
+      //    we are already signed in. If the session is null (confirmation email
+      //    was sent), sign in with password immediately so onboarding can
+      //    continue without forcing the admin to check their inbox first.
+      if (!signUpData.session) {
+        const { error: signInError } = await supabase.auth.signInWithPassword({
+          email:    adminEmail,
+          password: password,
+        });
+        if (signInError) {
+          // Supabase is strictly blocking unconfirmed logins — surface a clear message.
+          throw new Error(
+            'Account created — please check your email to confirm your address before signing in.',
+          );
+        }
+      }
+
+      safe = { id: authUid, email: adminEmail, role: 'admin', name: adminName, employeeId: null, subscriptionId, createdAt: new Date().toISOString() };
+    } catch (err) {
+      // Registration failed partway through — release the guard so the
+      // SIGNED_IN listener (or a subsequent real login) behaves normally again.
+      pendingUserRef.current = null;
+      throw err;
+    }
 
     // Prime pendingUserRef exactly like login() does, so that commitLogin()
     // (called by OnboardingPage after TransitionLoadingScreen finishes) can

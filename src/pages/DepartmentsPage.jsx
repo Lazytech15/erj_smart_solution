@@ -44,7 +44,7 @@ function DepartmentsContent() {
       />
 
       {departments.length === 0 ? (
-        <EmptyState icon={<Building2 size={24} />} title="No departments yet" description="Add departments to organise your employees." />
+        <EmptyState icon={Building2} title="No departments yet" description="Add departments to organise your employees." />
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           {departments.map(dept => {

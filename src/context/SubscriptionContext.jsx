@@ -7,10 +7,10 @@ export const PLANS = [
     id: 'free_trial',
     name: 'Free Trial',
     tagline: 'Try the basics — no card needed',
-    price: 0, currency: 'PHP', period: '14-day trial', maxSeats: 15, color: '#26c6da',
+    price: 0, currency: 'PHP', period: '14-day trial', maxSeats: 200, color: '#26c6da',
     badge: 'Free Trial', isTrial: true,
-    features: ['Up to 15 employees','Clock-in / Clock-out','Attendance records','Basic leave management','CSV export'],
-    limits: { reports: false, shifts: false, departments: false, biometric: false, api: false, sms: false, mobileApp: false, emailNotifs: false },
+    features: ['Includes a free 14-day trial of everything below','Up to 200 employees','Clock-in / Clock-out','Attendance records','Basic leave management','CSV export','Email support','Mobile app (iOS & Android)','Shift management','Department management','Analytics & reports','Overtime tracking','SMS notifications','Priority support'],
+    limits: { reports: true, shifts: true, departments: true, biometric: false, api: false, sms: true, mobileApp: true, emailNotifs: true },
   },
   {
     id: 'starter',
@@ -198,6 +198,12 @@ export function SubscriptionProvider({ children }) {
       createdAt: new Date().toISOString(),
       status: isTrial ? 'trialing' : 'active',
       trialEndsAt: isTrial ? new Date(Date.now() + 14*24*60*60*1000).toISOString() : null,
+      // Marks this account as having consumed its one-time free trial. Set
+      // once here and never cleared afterwards (upgradePlan only patches
+      // planId/status), so even after the trial expires or the client moves
+      // to a paid plan, free_trial can never be selected again from the
+      // Change Plan picker.
+      hasUsedTrial: isTrial,
     };
     setSubscription(state);         // sets both ref and React state (instant UI update)
     await putSubscription(state);   // AWAIT the Supabase write — caller now knows
@@ -333,7 +339,12 @@ export function SubscriptionProvider({ children }) {
     }
   }, [update]);
   const cancelSubscription = useCallback(()        => update(prev => ({ ...prev, status: 'cancelled' })), [update]);
-  const upgradePlan        = useCallback((planId)  => update(prev => ({ ...prev, planId, status: 'active' })), [update]);
+  const upgradePlan        = useCallback((planId)  => update(prev => {
+    if (planId === 'free_trial' && prev.hasUsedTrial) {
+      throw new Error('The free trial has already been used on this account.');
+    }
+    return { ...prev, planId, status: 'active' };
+  }), [update]);
   const clearSubscription  = useCallback(()        => setSubscription(null), []);  // eslint-disable-line
   const updateSettings     = useCallback((upd)     => update(prev => ({ ...prev, settings: { ...prev.settings, ...upd } })), [update]);
 

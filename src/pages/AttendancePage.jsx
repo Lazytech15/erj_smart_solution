@@ -1,4 +1,5 @@
 import { useState, useMemo } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { format, subDays, parseISO } from 'date-fns';
 import { Clock, ChevronLeft, ChevronRight, Plus, Download } from 'lucide-react';
 import { useSubscription } from '../context/SubscriptionContext';
@@ -107,9 +108,12 @@ export default function AttendancePage() {
   const shifts           = subscription?.shifts             || [];
   const lateThreshold    = Number(subscription?.settings?.lateThreshold ?? 15);
 
+  const [searchParams] = useSearchParams();
+  const initialStatus = searchParams.get('status');
+
   const [search,       setSearch]       = useState('');
   const [dept,         setDept]         = useState('all');
-  const [statusFilter, setStatusFilter] = useState('all');
+  const [statusFilter, setStatusFilter] = useState(STATUSES.includes(initialStatus) ? initialStatus : 'all');
   const [date,         setDate]         = useState(format(new Date(), 'yyyy-MM-dd'));
   const [addModal,     setAddModal]     = useState(false);
   const [editRecord,   setEditRecord]   = useState(null);
