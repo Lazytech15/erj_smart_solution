@@ -7,6 +7,22 @@ import {
   can as abacCan,
   ABAC_RESULT,
 } from '../utils/abac';
+import {
+  startSessionPolicy,
+  getSessionPolicy,
+  clearSessionPolicy,
+  isSessionPolicyExpired,
+  setLogoutReason,
+  INACTIVITY_TIMEOUT_MS,
+} from '../utils/sessionPolicy';
+
+// How often to poll for a lapsed session policy while the app is sitting
+// open (e.g. left on the dashboard overnight — this is what force-logs-out
+// at midnight without needing a page reload).
+const POLICY_CHECK_INTERVAL_MS = 30 * 1000;
+
+// User-activity events that count as "not idle" for the 30-minute timeout.
+const ACTIVITY_EVENTS = ['mousedown', 'mousemove', 'keydown', 'wheel', 'touchstart', 'scroll'];
 
 const AuthContext = createContext(null);
 
@@ -24,6 +40,8 @@ function buildUser(authUser, profile) {
     employeeId:     profile?.employee_id     ?? null,
     subscriptionId: profile?.subscription_id ?? null,
     permissions:    profile?.permissions     ?? [],
+    avatarUrl:        profile?.avatar_url          ?? null,
+    twoFactorEnabled: profile?.two_factor_enabled  ?? false,
     createdAt:      authUser.created_at,
   };
 }
@@ -36,18 +54,63 @@ export function AuthProvider({ children }) {
   const pendingAbacRef = useRef(null);
 
   // ── Bootstrap: restore session on mount ────────────────────────────────────
+  // Guards against the app getting stuck on the loading screen forever:
+  //  1. Hard timeout — if Supabase doesn't respond in time (e.g. a stale
+  //     session/lock left over from an improperly-closed browser tab), we
+  //     stop waiting and treat the user as logged out.
+  //  2. Explicit expiry check — a resolved session whose token has already
+  //     expired is treated the same as no session.
+  //  3. try/catch/finally — any error still guarantees authReady flips to
+  //     true so the router can make a decision instead of hanging.
+  const SESSION_RESTORE_TIMEOUT_MS = 8000;
+
   useEffect(() => {
     let mounted = true;
 
     async function restoreSession() {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (session?.user && mounted) {
-        const profile = await fetchProfile(session.user.id);
-        setUser(buildUser(session.user, profile));
-      } else if (mounted) {
-        setUser(null);
+      let timeoutId;
+      try {
+        const timeout = new Promise((_, reject) => {
+          timeoutId = setTimeout(() => reject(new Error('session-restore-timeout')), SESSION_RESTORE_TIMEOUT_MS);
+        });
+
+        const { data: { session } } = await Promise.race([
+          supabase.auth.getSession(),
+          timeout,
+        ]);
+        clearTimeout(timeoutId);
+
+        const isExpired = session?.expires_at && session.expires_at * 1000 <= Date.now();
+
+        // Security policy layer: force re-login past midnight (or past 24h
+        // for "remember me" sessions), independent of the JWT's own expiry.
+        const policyExpired = session?.user ? isSessionPolicyExpired() : false;
+
+        if (session?.user && !isExpired && !policyExpired && mounted) {
+          // Backfill a policy for sessions that predate this feature (or any
+          // other edge case where one wasn't recorded) — default, non-"remember
+          // me" terms, so it's still bound by the midnight/30-min-idle rules.
+          if (!getSessionPolicy()) startSessionPolicy(false);
+          const profile = await fetchProfile(session.user.id);
+          setUser(buildUser(session.user, profile));
+        } else if (mounted) {
+          if (isExpired || policyExpired) {
+            if (policyExpired) setLogoutReason('session_expired');
+            // Clear the stale/expired session so it isn't picked up again.
+            await supabase.auth.signOut().catch(() => {});
+            clearSessionPolicy();
+          }
+          setUser(null);
+        }
+      } catch (err) {
+        // Timed out or Supabase threw (e.g. bad/stale refresh token, offline).
+        // Fail safe to "logged out" rather than hanging indefinitely.
+        clearTimeout(timeoutId);
+        console.warn('Session restore failed, treating as logged out:', err);
+        if (mounted) setUser(null);
+      } finally {
+        if (mounted) setAuthReady(true);
       }
-      if (mounted) setAuthReady(true);
     }
 
     restoreSession();
@@ -89,7 +152,7 @@ export function AuthProvider({ children }) {
   async function fetchProfile(authUid) {
     const { data } = await supabase
       .from('accounts')
-      .select('role, name, employee_id, subscription_id, permissions')
+      .select('role, name, employee_id, subscription_id, permissions, avatar_url, two_factor_enabled')
       .eq('auth_uid', authUid)
       .maybeSingle();
     return data ?? null;
@@ -171,6 +234,13 @@ export function AuthProvider({ children }) {
     // actually set the user. Without this, commitLogin() found nothing in
     // pendingUserRef and silently no-op'd — `user` only got set later (and
     // racily) via the onAuthStateChange SIGNED_IN listener.
+    // Same reasoning as login(): written immediately (not deferred to
+    // commitLogin) so a refresh during onboarding's transition screen can't
+    // leave the session with no policy on record. Onboarding has no
+    // "remember me" control, so this always uses the default (midnight-
+    // expiry, 30-min-idle) terms.
+    startSessionPolicy(false);
+
     pendingUserRef.current = safe;
     pendingAbacRef.current = null;
 
@@ -184,30 +254,17 @@ export function AuthProvider({ children }) {
    * 3. Runs ABAC policy.
    * 4. On DENY → throws. On ALLOW/FLAG → stores in refs for commitLogin().
    */
-  const login = useCallback(async (email, password) => {
-    // ── Credential check via Supabase Auth ──────────────────────────────────
-    const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
-      email,
-      password,
-    });
-
-    if (signInError) {
-      recordLoginAttempt(email, false);
-      // Surface a friendly message instead of Supabase's raw error
-      throw new Error('Invalid email or password');
-    }
-
-    const authUser = signInData.user;
-
-    // ── Fetch profile row ────────────────────────────────────────────────────
+  // Shared tail-end of the login flow: profile fetch → ABAC → bookkeeping.
+  // Used both by a normal (no-2FA) login and after a 2FA code is verified.
+  const finishLogin = useCallback(async (authUser, email, rememberMe) => {
     const profile = await fetchProfile(authUser.id);
     const safe    = buildUser(authUser, profile);
 
-    // ── ABAC evaluation ──────────────────────────────────────────────────────
     const abacResult = await evaluateABACPolicy(safe);
     if (abacResult.result === ABAC_RESULT.DENY) {
       recordLoginAttempt(email, false);
       await supabase.auth.signOut(); // undo the Auth sign-in
+      pendingUserRef.current = null; // release the guard — no session survives a DENY
       throw new Error(abacResult.reason);
     }
 
@@ -216,8 +273,87 @@ export function AuthProvider({ children }) {
     pendingUserRef.current = safe;
     pendingAbacRef.current = abacResult;
 
+    // Written here (not in commitLogin) deliberately: commitLogin only runs
+    // once the "Signing you in…" transition animation finishes, a couple of
+    // seconds later. If the page were refreshed in that window, commitLogin
+    // would never run, leaving no policy on record — and the bootstrap
+    // restore path would then backfill a default (non-"remember me") one,
+    // silently discarding whatever the user actually chose on the login
+    // form. Setting it right here, as soon as credentials are verified,
+    // means it's correct even if the tab is refreshed mid-transition.
+    startSessionPolicy(rememberMe);
+
     return { user: safe, abac: abacResult };
   }, []);
+
+  const login = useCallback(async (email, password, rememberMe = false) => {
+    // Block the onAuthStateChange SIGNED_IN listener from the very start —
+    // signInWithPassword() fires SIGNED_IN internally as soon as it
+    // establishes a session, before its own promise resolves to us. If the
+    // guard were only set later (e.g. after the MFA check below, which adds
+    // its own awaits), the listener's `if (!pendingUserRef.current)` branch
+    // would race ahead, fetch the profile, and log the user straight in —
+    // skipping the two-factor prompt entirely. Setting a sentinel here keeps
+    // the guard closed for the whole flow, same fix as registerCompanyAdmin.
+    pendingUserRef.current = true;
+
+    // ── Credential check via Supabase Auth ──────────────────────────────────
+    const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
+
+    if (signInError) {
+      pendingUserRef.current = null; // release the guard — sign-in never happened
+      recordLoginAttempt(email, false);
+      // Surface a friendly message instead of Supabase's raw error
+      throw new Error('Invalid email or password');
+    }
+
+    const authUser = signInData.user;
+
+    // ── Two-factor check ─────────────────────────────────────────────────────
+    // signInWithPassword() only grants "aal1". If the account has a verified
+    // TOTP factor, Supabase requires stepping up to "aal2" before the
+    // session is fully trusted — surface that to the caller instead of
+    // completing login, so the UI can prompt for the 6-digit code.
+    const { data: aal } = await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
+    if (aal && aal.nextLevel === 'aal2' && aal.nextLevel !== aal.currentLevel) {
+      // Keep the guard closed (pendingUserRef stays truthy) — the session is
+      // live at aal1 but must not be treated as logged in yet. It's released
+      // once verifyMfaAndLogin() finishes (success → real user object) or
+      // the login page cancels the challenge (which signs the session out,
+      // triggering the SIGNED_OUT branch instead).
+      const { data: factorsData } = await supabase.auth.mfa.listFactors();
+      const factor = factorsData?.totp?.find(f => f.status === 'verified');
+      const mfaError = new Error('Two-factor code required.');
+      mfaError.mfaRequired = true;
+      mfaError.factorId = factor?.id ?? null;
+      throw mfaError;
+    }
+
+    return finishLogin(authUser, email, rememberMe);
+  }, [finishLogin]);
+
+  // ── verifyMfaAndLogin ────────────────────────────────────────────────────
+  // Completes login after `login()` threw `{ mfaRequired: true, factorId }`.
+  const verifyMfaAndLogin = useCallback(async (factorId, code, email, rememberMe = false) => {
+    const { data: challenge, error: challengeError } = await supabase.auth.mfa.challenge({ factorId });
+    if (challengeError) throw new Error(challengeError.message || 'Could not start verification.');
+
+    const { data: verifyData, error: verifyError } = await supabase.auth.mfa.verify({
+      factorId,
+      challengeId: challenge.id,
+      code,
+    });
+    if (verifyError) {
+      recordLoginAttempt(email, false);
+      throw new Error('Invalid or expired code. Please try again.');
+    }
+
+    const authUser = verifyData.user;
+    return finishLogin(authUser, email, rememberMe);
+  }, [finishLogin]);
 
   // ── commitLogin ─────────────────────────────────────────────────────────────
   /**
@@ -237,17 +373,96 @@ export function AuthProvider({ children }) {
   }, []);
 
   // ── logout ───────────────────────────────────────────────────────────────────
-  const logout = useCallback(async () => {
-    await supabase.auth.signOut();
-    setUser(null);
-    cacheClear();
+  // supabase.auth.signOut() is a network call and can throw (offline, already-
+  // expired/invalid session, timeout, etc.). Previously that would abort this
+  // function before any local state was cleared, so a failed sign-out request
+  // left the user looking "still logged in" with nothing wiped. The try/finally
+  // here guarantees local session state and sensitive localStorage data are
+  // always cleared, regardless of whether the remote call succeeds.
+  const logout = useCallback(async (reason = null) => {
+    // Recorded first (before signOut/clearSessionPolicy) so it's on disk
+    // even if the network call below hangs or throws.
+    if (reason) setLogoutReason(reason);
+    try {
+      await supabase.auth.signOut();
+    } catch (err) {
+      console.warn('supabase.auth.signOut() failed, clearing local session anyway:', err);
+    } finally {
+      clearSessionPolicy();
+      cacheClear();
+
+      // Defense-in-depth: supabase-js normally strips its own auth token from
+      // localStorage as part of signOut(), but if signOut() threw before it
+      // got that far, don't leave a stale JWT sitting around.
+      try {
+        Object.keys(localStorage)
+          .filter((key) => key.startsWith('sb-') && key.endsWith('-auth-token'))
+          .forEach((key) => localStorage.removeItem(key));
+      } catch { /* localStorage unavailable — nothing more we can do */ }
+
+      setUser(null);
+    }
+  }, []);
+
+  // ── Session policy enforcement while the app stays open ────────────────────
+  // Two independent watchdogs, both only active while a user is signed in:
+  //  1. Poll every 30s for the policy having lapsed (midnight rollover, or
+  //     24h for "remember me") — catches the case where the tab is just
+  //     left open past the cutoff, no reload involved.
+  //  2. Inactivity timer — 30 minutes with no mouse/keyboard/scroll/touch
+  //     activity force-logs-out. Skipped entirely when "remember me" is on.
+  useEffect(() => {
+    if (!user) return;
+
+    const policy = getSessionPolicy();
+
+    const policyInterval = setInterval(() => {
+      if (isSessionPolicyExpired()) {
+        logout('session_expired');
+      }
+    }, POLICY_CHECK_INTERVAL_MS);
+
+    let inactivityTimer = null;
+    let handleActivity = null;
+
+    if (!policy?.rememberMe) {
+      const resetInactivityTimer = () => {
+        if (inactivityTimer) clearTimeout(inactivityTimer);
+        inactivityTimer = setTimeout(() => {
+          logout('inactivity');
+        }, INACTIVITY_TIMEOUT_MS);
+      };
+
+      handleActivity = resetInactivityTimer;
+      ACTIVITY_EVENTS.forEach(evt => window.addEventListener(evt, handleActivity, { passive: true }));
+      resetInactivityTimer();
+    }
+
+    return () => {
+      clearInterval(policyInterval);
+      if (inactivityTimer) clearTimeout(inactivityTimer);
+      if (handleActivity) ACTIVITY_EVENTS.forEach(evt => window.removeEventListener(evt, handleActivity));
+    };
+  }, [user, logout]);
+
+  // ── refreshProfile ──────────────────────────────────────────────────────────
+  // Re-fetches the `accounts` row for the current user and merges it into
+  // state. Used after a profile edit (e.g. display name change) so the
+  // sidebar/header reflect it immediately without a full page reload.
+  const refreshProfile = useCallback(async () => {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (!session?.user) return null;
+    const profile = await fetchProfile(session.user.id);
+    const updated = buildUser(session.user, profile);
+    setUser(updated);
+    return updated;
   }, []);
 
   // ── can ──────────────────────────────────────────────────────────────────────
   const can = useCallback((permission) => abacCan(user, permission), [user]);
 
   return (
-    <AuthContext.Provider value={{ user, authReady, login, commitLogin, logout, can, registerCompanyAdmin }}>
+    <AuthContext.Provider value={{ user, authReady, login, verifyMfaAndLogin, commitLogin, logout, can, registerCompanyAdmin, refreshProfile }}>
       {children}
     </AuthContext.Provider>
   );

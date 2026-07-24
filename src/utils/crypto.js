@@ -3,6 +3,30 @@
  * ==========================================
  * AES-256-CBC + HMAC-SHA-256 (Encrypt-then-MAC)
  *
+ * ⚠️ THREAT MODEL — READ BEFORE RELYING ON THIS ⚠️
+ * ─────────────────────────────────────────────────
+ * VITE_ENCRYPTION_KEY is bundled directly into the shipped JavaScript at
+ * build time (any Vite env var prefixed VITE_ is inlined into client code,
+ * by design — it is not a server-side secret). Anyone who opens your
+ * deployed app's DevTools or views the built .js files can read it.
+ *
+ * What this DOES protect against:
+ *   - Someone with raw read access to the Supabase database (or a DB
+ *     backup/export) who doesn't also have your frontend bundle.
+ *   - Casual inspection of the `accounts`/`pending_registrations` tables.
+ *
+ * What this does NOT protect against:
+ *   - Anyone who can load your deployed app (i.e. everyone) — they can
+ *     always derive the same key and decrypt any value they can also read
+ *     via the app's own Supabase queries/RLS policies.
+ *   - It is not a substitute for Supabase Row-Level Security — RLS is what
+ *     actually controls who can read a row in the first place.
+ *
+ * If you need protection against "anyone with the frontend can decrypt",
+ * the key must live server-side only (a Supabase Edge Function / your own
+ * backend that never ships the key to the browser) — that's a real
+ * architecture change, not a config tweak.
+ *
  * Architecture
  * ────────────
  * This app talks to Supabase directly — there is no custom API server that

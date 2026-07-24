@@ -1,9 +1,10 @@
 import { useState, useEffect, useRef } from 'react';
-import { Clock, Plus, Trash2, Pencil, Users, QrCode, Wifi, MapPin, X, Download, Layers } from 'lucide-react';
+import { Clock, Plus, Trash2, Pencil, Users, QrCode, Wifi, MapPin, X, Download, Layers, Coffee } from 'lucide-react';
 import { useSubscription } from '../context/SubscriptionContext';
 import { SectionHeader, Modal, InputField, EmptyState } from '../components/ui';
 import { useToast } from '../context/ToastContext';
 import PlanGate from '../components/PlanGate';
+import { hhmmDiffMinutes } from '../utils/dateTime';
 
 const SHIFT_COLORS = ['#f59e0b','#4f6ef7','#10b981','#8b5cf6','#ef4444','#ec4899','#06b6d4'];
 
@@ -12,8 +13,17 @@ const EMPTY_FORM = {
   clockInMode: 'remote', qrValidity: 'daily',
   clockType: 'standard', // 'standard' = 1 clock in/out · 'split' = multiple sessions per day
   sessions: [],
+  breaks: [], // breaks within the shift, e.g. { label: 'Lunch', start: '12:00', end: '13:00', paid: false } — unpaid ones are auto-deducted from worked hours
   departments: [], // department names this shift auto-assigns to
 };
+
+// Quick-fill template for the most common break setup: a short morning
+// break, an hour for lunch, and a short afternoon break. Unpaid by default.
+const BREAK_TEMPLATE = [
+  { label: 'Morning Break',   start: '10:00', end: '10:15', paid: false },
+  { label: 'Lunch',           start: '12:00', end: '13:00', paid: false },
+  { label: 'Afternoon Break', start: '15:00', end: '15:15', paid: false },
+];
 
 // Quick-fill templates for the most common split-shift setups, matching
 // typical Philippine company schedules (lunch-break split, or a third
@@ -35,6 +45,10 @@ const SESSION_TEMPLATES = {
  *  every other part of the app (QR payload, shift chips, status calc) that
  *  reads shift.start/shift.end keeps working without any changes. */
 function buildShiftPayload(form) {
+  const breaks = (form.breaks || [])
+    .filter(b => b.start && b.end)
+    .map((b, i) => ({ id: b.id ?? `b${i + 1}`, label: b.label?.trim() || `Break ${i + 1}`, start: b.start, end: b.end, paid: !!b.paid }));
+
   if ((form.clockType || 'standard') === 'split' && form.sessions?.length) {
     const sessions = form.sessions.map((s, i) => ({
       id: s.id ?? `s${i + 1}`,
@@ -46,11 +60,12 @@ function buildShiftPayload(form) {
       ...form,
       clockType: 'split',
       sessions,
+      breaks,
       start: sessions[0].start,
       end: sessions[sessions.length - 1].end,
     };
   }
-  return { ...form, clockType: 'standard', sessions: [] };
+  return { ...form, clockType: 'standard', sessions: [], breaks };
 }
 
 // ── Tiny pure-JS QR renderer (no external lib needed) ────────────────────────
@@ -236,6 +251,40 @@ function ShiftFormFields({ form, setForm, departments = [], employees = [], allS
     setForm(p => ({ ...p, sessions: (p.sessions || []).filter((_, i) => i !== idx) }));
   }
 
+  const breaks = form.breaks || [];
+
+  function updateBreak(idx, key, value) {
+    setForm(p => {
+      const next = [...(p.breaks || [])];
+      next[idx] = { ...next[idx], [key]: value };
+      return { ...p, breaks: next };
+    });
+  }
+
+  function addBreak() {
+    setForm(p => {
+      const list = p.breaks || [];
+      return { ...p, breaks: [...list, { label: `Break ${list.length + 1}`, start: '15:00', end: '15:15', paid: false }] };
+    });
+  }
+
+  function removeBreak(idx) {
+    setForm(p => ({ ...p, breaks: (p.breaks || []).filter((_, i) => i !== idx) }));
+  }
+
+  function applyBreakTemplate() {
+    setForm(p => ({ ...p, breaks: BREAK_TEMPLATE.map(b => ({ ...b })) }));
+  }
+
+  const totalBreakMinutes = breaks.reduce((acc, b) => {
+    if (!b.start || !b.end || b.paid) return acc;
+    const [sh, sm] = b.start.split(':').map(Number);
+    const [eh, em] = b.end.split(':').map(Number);
+    let diff = (eh * 60 + em) - (sh * 60 + sm);
+    if (diff < 0) diff += 24 * 60;
+    return acc + diff;
+  }, 0);
+
   function toggleDept(dept) {
     setForm(p => {
       const list = p.departments || [];
@@ -382,6 +431,66 @@ function ShiftFormFields({ form, setForm, departments = [], employees = [], allS
         </div>
       )}
 
+      {/* Breaks — unpaid windows (lunch, coffee breaks, etc.) inside the shift.
+           Works for both standard and split shifts; any break whose window
+           falls fully within a punched clock-in/out is auto-deducted from
+           worked hours on the Attendance page. */}
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <p className="text-xs font-medium text-ink-600">
+            Breaks{' '}
+            <span className="text-ink-300 font-normal">
+              {totalBreakMinutes > 0 ? `(${totalBreakMinutes} min unpaid, auto-deducted)` : '(optional)'}
+            </span>
+          </p>
+          {breaks.length === 0 && (
+            <button type="button" onClick={applyBreakTemplate} className="text-[10px] font-medium text-brand-500 hover:underline">
+              Use typical template
+            </button>
+          )}
+        </div>
+
+        <div className="space-y-2">
+          {breaks.map((b, idx) => (
+            <div key={idx} className="flex items-center gap-1.5 p-2 rounded-lg border border-surface-200 bg-surface-50">
+              <input
+                type="text"
+                value={b.label}
+                onChange={e => updateBreak(idx, 'label', e.target.value)}
+                placeholder={`Break ${idx + 1}`}
+                className="input !py-1.5 !text-xs flex-1 min-w-0"
+              />
+              <input type="time" value={b.start} onChange={e => updateBreak(idx, 'start', e.target.value)} className="input !py-1.5 !text-xs w-[104px] shrink-0" />
+              <span className="text-ink-300 text-xs shrink-0">–</span>
+              <input type="time" value={b.end} onChange={e => updateBreak(idx, 'end', e.target.value)} className="input !py-1.5 !text-xs w-[104px] shrink-0" />
+              <button
+                type="button"
+                onClick={() => updateBreak(idx, 'paid', !b.paid)}
+                title={b.paid ? 'Paid — not deducted from worked hours' : 'Unpaid — deducted from worked hours'}
+                className={`shrink-0 px-2 py-1 rounded-md text-[10px] font-medium border transition-colors ${
+                  b.paid
+                    ? 'bg-brand-50 text-brand-600 border-brand-200'
+                    : 'bg-surface-100 text-ink-400 border-surface-200'
+                }`}
+              >
+                {b.paid ? 'Paid' : 'Unpaid'}
+              </button>
+              <button type="button" onClick={() => removeBreak(idx)} className="p-1 rounded-md text-ink-300 hover:text-danger-500 hover:bg-danger-50 transition-colors shrink-0">
+                <X size={13} />
+              </button>
+            </div>
+          ))}
+        </div>
+
+        <button type="button" onClick={addBreak} className="flex items-center gap-1.5 text-[11px] font-medium text-brand-500 hover:text-brand-600 mt-2">
+          <Plus size={12} /> Add break
+        </button>
+
+        <p className="text-[10px] text-ink-400 mt-2 leading-relaxed">
+          Employees don't clock in/out for these — e.g. a 10:00–10:15 break, 12:00–13:00 lunch, and 15:00–15:15 break. Mark a break <span className="font-medium text-ink-500">Unpaid</span> to have it subtracted from worked hours automatically (only the portion actually covered by a clock-in/out is deducted); mark it <span className="font-medium text-ink-500">Paid</span> to keep it counted as worked time.
+        </p>
+      </div>
+
       {/* Clock-in Mode */}
       <div>
         <p className="text-xs font-medium text-ink-600 mb-2">Clock-in Mode</p>
@@ -484,6 +593,7 @@ function ShiftsContent() {
       qrValidity: shift.qrValidity || 'daily',
       clockType: shift.clockType || 'standard',
       sessions: shift.sessions?.length ? shift.sessions.map(s => ({ ...s })) : [],
+      breaks: shift.breaks?.length ? shift.breaks.map(b => ({ ...b })) : [],
       departments: shift.departments ? [...shift.departments] : [],
     });
     setEditTarget(shift);
@@ -521,6 +631,7 @@ function ShiftsContent() {
       qrValidity: form.qrValidity,
       clockType: payload.clockType,
       sessions: payload.sessions,
+      breaks: payload.breaks,
       departments: form.departments || [],
     });
     // Bulk-reassign employees in the selected departments to this shift
@@ -598,6 +709,17 @@ function ShiftsContent() {
                             <Layers size={11} className="text-violet-400" />
                             <span className="text-[11px] font-medium text-violet-500">
                               {shift.sessions.length * 2} punches/day
+                            </span>
+                          </div>
+                        </>
+                      )}
+                      {shift.breaks?.length > 0 && (
+                        <>
+                          <span className="text-ink-200">·</span>
+                          <div className="flex items-center gap-1">
+                            <Coffee size={11} className="text-amber-400" />
+                            <span className="text-[11px] font-medium text-amber-500">
+                              {shift.breaks.reduce((acc, b) => acc + (b.start && b.end ? hhmmDiffMinutes(b.start, b.end) : 0), 0)} min break
                             </span>
                           </div>
                         </>

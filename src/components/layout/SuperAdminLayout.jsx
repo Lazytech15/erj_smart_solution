@@ -38,7 +38,7 @@ export default function SuperAdminLayout() {
             {user?.name || user?.email}
           </span>
           <button
-            onClick={() => { logout(); navigate('/login'); }}
+            onClick={async () => { await logout(); navigate('/login'); }}
             className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg transition-colors"
             style={{ background: 'rgba(239,68,68,0.12)', color: '#f87171' }}
           >

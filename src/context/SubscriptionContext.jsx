@@ -152,7 +152,14 @@ export function SubscriptionProvider({ children }) {
     }
     const next = updater(current);    // may throw synchronously (e.g. seat limit) — propagates to caller
     setSubscription(next);            // updates both ref and React state
-    await putSubscription(next);      // AWAIT persist to Supabase
+    try {
+      await putSubscription(next);    // AWAIT persist to Supabase
+    } catch (err) {
+      // Persist failed — roll back the optimistic local update so the UI
+      // never shows a change as "saved" when it only exists in memory.
+      setSubscription(current);
+      throw err;
+    }
     return next;
   }, []); // eslint-disable-line — subRef and setSubscription are stable refs
 
@@ -372,7 +379,7 @@ export function SubscriptionProvider({ children }) {
 
   // ── Leave ─────────────────────────────────────────────────────────────────────
   const addLeaveRequest = useCallback((req) => {
-    update(prev => ({
+    return update(prev => ({
       ...prev,
       leaveRequests: [
         ...prev.leaveRequests,
@@ -387,7 +394,7 @@ export function SubscriptionProvider({ children }) {
   }, [update]);
 
   const updateLeaveRequest = useCallback((reqId, updates) => {
-    update(prev => ({
+    return update(prev => ({
       ...prev,
       leaveRequests: prev.leaveRequests.map(r => r.id === reqId ? { ...r, ...updates } : r),
     }));
@@ -395,7 +402,7 @@ export function SubscriptionProvider({ children }) {
 
   // ── Leave Types ───────────────────────────────────────────────────────────────
   const addLeaveType = useCallback((name, defaultBalance) => {
-    update(prev => {
+    return update(prev => {
       const existing = prev.settings?.leaveTypes ?? [];
       if (existing.some(t => t.name.toLowerCase() === name.toLowerCase())) {
         throw new Error(`Leave type "${name}" already exists.`);
@@ -423,7 +430,7 @@ export function SubscriptionProvider({ children }) {
   }, [update]);
 
   const updateLeaveType = useCallback((name, updates) => {
-    update(prev => ({
+    return update(prev => ({
       ...prev,
       settings: {
         ...prev.settings,
@@ -435,7 +442,7 @@ export function SubscriptionProvider({ children }) {
   }, [update]);
 
   const removeLeaveType = useCallback((name) => {
-    update(prev => ({
+    return update(prev => ({
       ...prev,
       // Remove from leaveTypes list
       settings: {
@@ -453,7 +460,7 @@ export function SubscriptionProvider({ children }) {
 
   // ── Leave Balances ────────────────────────────────────────────────────────────
   const setEmployeeLeaveBalance = useCallback((employeeId, typeName, value) => {
-    update(prev => ({
+    return update(prev => ({
       ...prev,
       enrolledEmployees: prev.enrolledEmployees.map(emp =>
         String(emp.id) === String(employeeId)

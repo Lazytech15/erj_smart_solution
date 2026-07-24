@@ -24,6 +24,8 @@ import ShiftsPage from './pages/ShiftsPage';
 import DepartmentsPage from './pages/DepartmentsPage';
 import SettingsPage from './pages/SettingsPage';
 import SubscriptionPage from './pages/SubscriptionPage';
+import ProfilePage from './pages/ProfilePage';
+import HelpCenterPage from './pages/HelpCenterPage';
 import SuperAdminLayout from './components/layout/SuperAdminLayout';
 import SuperAdminPage from './pages/SuperAdminPage';
 
@@ -155,6 +157,8 @@ function AppRoutes() {
         <Route path="shifts"       element={<RoleRoute roles={['admin','hr']}><PlanGate feature="shifts"><ShiftsPage /></PlanGate></RoleRoute>} />
         <Route path="departments"  element={<RoleRoute roles={['admin','hr']}><DepartmentsPage /></RoleRoute>} />
         <Route path="settings"     element={<RoleRoute roles={['admin']}><SettingsPage /></RoleRoute>} />
+        <Route path="profile"      element={<ProfilePage />} />
+        <Route path="help"         element={<HelpCenterPage />} />
       </Route>
 
       {/* ── Superadmin (platform owner) ── */}
@@ -169,7 +173,7 @@ function AppRoutes() {
 
 export default function App() {
   return (
-    <BrowserRouter>
+    <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
       <AuthProvider>
         <SubscriptionProvider>
           <NotificationsProvider>

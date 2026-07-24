@@ -3,19 +3,19 @@ import { useSearchParams } from 'react-router-dom';
 import { format, subDays, parseISO } from 'date-fns';
 import { Clock, ChevronLeft, ChevronRight, Plus, Download } from 'lucide-react';
 import { useSubscription } from '../context/SubscriptionContext';
-import { fmt, getSessionPunches, getShiftSessions, computeWorkedMinutes, minutesToHHMM } from '../utils/dateTime';
+import { fmt, getSessionPunches, getShiftSessions, computeWorkedMinutes, computeOvertimeMinutes, minutesToHHMM } from '../utils/dateTime';
 import { StatusBadge, Avatar, SearchInput, SelectField, SectionHeader, EmptyState, Modal, InputField } from '../components/ui';
 import { useToast } from '../context/ToastContext';
 import { useAuth } from '../context/AuthContext';
 
-function exportToCSV(records, date) {
+function exportToCSV(records, date, lateThreshold) {
   const headers = ['Employee Code', 'First Name', 'Last Name', 'Department', 'Shift', 'Clock In', 'Clock Out', 'Hours Worked', 'Session Detail', 'Status', 'Notes'];
   const rows = records.map(r => {
     const punches = getSessionPunches(r);
     const sessionDetail = punches
       .map(p => `${p.label ? p.label + ' ' : ''}${p.clockIn || '—'}-${p.clockOut || '—'}`)
       .join(' | ');
-    const minutes = computeWorkedMinutes(r);
+    const minutes = computeWorkedMinutes(r, r.shift, lateThreshold);
     return [
       r.employee.employeeCode || '',
       r.employee.firstName,
@@ -63,11 +63,12 @@ function calcStatus(clockInTime, shiftStart, lateThresholdMin = 15) {
  *  first/last session as a best-effort migration. */
 function deriveFormSessions(shift, record) {
   const shiftSessions = getShiftSessions(shift);
+  const isLegacyRecord = !record?.sessions; // no per-session breakdown saved at all
   return shiftSessions.map((ss, i) => ({
     sessionId: ss.id,
     label: ss.label,
-    clockIn:  record?.sessions?.[i]?.clockIn  ?? (i === 0 ? (record?.clockIn || '') : ''),
-    clockOut: record?.sessions?.[i]?.clockOut ?? (i === shiftSessions.length - 1 ? (record?.clockOut || '') : ''),
+    clockIn:  isLegacyRecord ? (i === 0 ? (record?.clockIn || '') : '') : (record.sessions[i]?.clockIn || ''),
+    clockOut: isLegacyRecord ? (i === shiftSessions.length - 1 ? (record?.clockOut || '') : '') : (record.sessions[i]?.clockOut || ''),
   }));
 }
 
@@ -107,6 +108,7 @@ export default function AttendancePage() {
   const departments      = subscription?.departments        || [];
   const shifts           = subscription?.shifts             || [];
   const lateThreshold    = Number(subscription?.settings?.lateThreshold ?? 15);
+  const overtimeMin      = Number(subscription?.settings?.overtimeMin ?? 30);
 
   const [searchParams] = useSearchParams();
   const initialStatus = searchParams.get('status');
@@ -170,7 +172,7 @@ export default function AttendancePage() {
             {records.length > 0 && (
               <button
                 className="btn-secondary btn-sm"
-                onClick={() => { exportToCSV(records, date); toast('Attendance exported to CSV', 'success'); }}
+                onClick={() => { exportToCSV(records, date, lateThreshold); toast('Attendance exported to CSV', 'success'); }}
               >
                 <Download size={13} /> Export CSV
               </button>
@@ -226,7 +228,10 @@ export default function AttendancePage() {
               </tr>
             </thead>
             <tbody>
-              {records.map(rec => (
+              {records.map(rec => {
+                const rowWorkedMinutes = computeWorkedMinutes(rec, rec.shift, lateThreshold);
+                const rowOvertimeMinutes = computeOvertimeMinutes(rec, rec.shift, lateThreshold);
+                return (
                 <tr key={rec.id}>
                   <td>
                     <div className="flex items-center gap-2.5">
@@ -266,18 +271,31 @@ export default function AttendancePage() {
                     )}
                   </td>
                   <td>
-                    <span className="text-xs text-ink-600">
-                      {computeWorkedMinutes(rec) ? minutesToHHMM(computeWorkedMinutes(rec)) : '—'}
-                    </span>
+                    <div className="flex flex-col gap-0.5">
+                      <span className="text-xs text-ink-600">
+                        {rowWorkedMinutes ? minutesToHHMM(rowWorkedMinutes) : '—'}
+                      </span>
+                      {rowOvertimeMinutes >= overtimeMin && (
+                        <span className="text-[10px] font-semibold text-brand-600">
+                          +{minutesToHHMM(rowOvertimeMinutes)} OT
+                        </span>
+                      )}
+                    </div>
                   </td>
-                  <td><StatusBadge status={rec.status} /></td>
+                  <td>
+                    <div className="flex flex-col gap-1 items-start">
+                      <StatusBadge status={rec.status} />
+                      {rowOvertimeMinutes >= overtimeMin && <StatusBadge status="overtime" />}
+                    </div>
+                  </td>
                   {can('edit_all') && (
                     <td>
                       <button onClick={() => setEditRecord(rec)} className="btn-ghost btn-sm p-1.5 rounded-md text-xs">Edit</button>
                     </td>
                   )}
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>

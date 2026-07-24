@@ -1,6 +1,6 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Eye, EyeOff, ArrowRight, Clock, FileText, Users, Shield, AlertTriangle, CheckCircle } from 'lucide-react';
+import { Eye, EyeOff, ArrowRight, Clock, FileText, Users, Shield, ShieldCheck, AlertTriangle, CheckCircle, LogOut } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
 import { Spinner } from '../components/ui';
@@ -8,6 +8,19 @@ import TransitionLoadingScreen from '../components/TransitionLoadingScreen';
 import { getSubscription } from '../utils/db';
 import { ABAC_RESULT } from '../utils/abac';
 import { supabase } from '../utils/supabase';
+import { consumeLogoutReason } from '../utils/sessionPolicy';
+
+/** Human-readable copy for each force-logout reason. */
+const LOGOUT_NOTICES = {
+  inactivity: {
+    title: 'Signed out due to inactivity',
+    message: "You were signed out because there was no activity for 30 minutes. This helps keep your account secure. Please sign in again to continue.",
+  },
+  session_expired: {
+    title: 'Session expired',
+    message: "Your session has ended (sessions without \u201CRemember me\u201D reset at midnight; \u201CRemember me\u201D sessions last 24 hours). Please sign in again to continue.",
+  },
+};
 
 const FEATURES = [
   { icon: Clock,  label: 'Real-time attendance tracking' },
@@ -28,12 +41,13 @@ function describeFlagCode(code) {
 }
 
 export default function LoginPage() {
-  const { login, commitLogin } = useAuth();
+  const { login, verifyMfaAndLogin, commitLogin } = useAuth();
   const toast   = useToast();
   const navigate = useNavigate();
 
   const [email,       setEmail]       = useState('');
   const [password,    setPassword]    = useState('');
+  const [rememberMe,  setRememberMe]  = useState(false);
   const [showPw,      setShowPw]      = useState(false);
   const [loading,     setLoading]     = useState(false);
   const [error,       setError]       = useState('');
@@ -44,12 +58,26 @@ export default function LoginPage() {
   /** Stores ABAC flags so we can show a notice after login completes */
   const [securityFlags, setSecurityFlags] = useState([]);
 
+  /** Two-factor challenge step, entered after a password check reports the
+   *  account requires a TOTP code (see login()'s `mfaRequired` throw). */
+  const [mfaStep,   setMfaStep]   = useState(null); // { factorId } | null
+  const [mfaCode,   setMfaCode]   = useState('');
+  const [mfaError,  setMfaError]  = useState('');
+  const [mfaLoading, setMfaLoading] = useState(false);
+
   /** Forgot password flow */
   const [forgotMode,      setForgotMode]      = useState(false);
   const [forgotEmail,     setForgotEmail]     = useState('');
   const [forgotLoading,   setForgotLoading]   = useState(false);
   const [forgotSent,      setForgotSent]      = useState(false);
   const [forgotError,     setForgotError]     = useState('');
+
+  /** Force-logout notice (inactivity / session expiry) — shown once, on landing here */
+  const [logoutNotice, setLogoutNotice] = useState(null);
+  useEffect(() => {
+    const reason = consumeLogoutReason();
+    if (reason && LOGOUT_NOTICES[reason]) setLogoutNotice(LOGOUT_NOTICES[reason]);
+  }, []);
 
   async function handleForgotPassword(e) {
     e.preventDefault();
@@ -74,7 +102,7 @@ export default function LoginPage() {
     setError('');
     setLoading(true);
     try {
-      const { user, abac } = await login(email, password);
+      const { user, abac } = await login(email, password, rememberMe);
       toast('Welcome back!', 'success');
       loggedInRoleRef.current = user?.role ?? null;
 
@@ -90,8 +118,36 @@ export default function LoginPage() {
       setSubscriptionPromise(subPromise);
       setTransitioning(true);
     } catch (err) {
+      if (err.mfaRequired) {
+        setMfaStep({ factorId: err.factorId });
+        setLoading(false);
+        return;
+      }
       setError(err.message);
       setLoading(false);
+    }
+  }
+
+  async function handleVerifyMfa(e) {
+    e.preventDefault();
+    setMfaError('');
+    if (!/^\d{6}$/.test(mfaCode)) { setMfaError('Enter the 6-digit code from your authenticator app.'); return; }
+    setMfaLoading(true);
+    try {
+      const { user, abac } = await verifyMfaAndLogin(mfaStep.factorId, mfaCode, email, rememberMe);
+      toast('Welcome back!', 'success');
+      loggedInRoleRef.current = user?.role ?? null;
+      if (abac?.flags?.length) setSecurityFlags(abac.flags);
+
+      const subPromise = (user?.subscriptionId && !['superadmin', 'sub_superadmin'].includes(user?.role))
+        ? getSubscription(user.subscriptionId)
+        : Promise.resolve(null);
+
+      setSubscriptionPromise(subPromise);
+      setTransitioning(true);
+    } catch (err) {
+      setMfaError(err.message);
+      setMfaLoading(false);
     }
   }
 
@@ -257,6 +313,23 @@ export default function LoginPage() {
                 </div>
               </div>
 
+              <label className="flex items-center gap-2 select-none cursor-pointer -mt-1">
+                <input
+                  type="checkbox"
+                  checked={rememberMe}
+                  onChange={e => setRememberMe(e.target.checked)}
+                  className="w-3.5 h-3.5 rounded border-slate-300 text-indigo-600 focus:ring-indigo-400 cursor-pointer"
+                />
+                <span className="text-xs text-slate-500">
+                  Remember me <span className="text-slate-400">(24 hours)</span>
+                </span>
+              </label>
+              <p className="text-[11px] text-slate-400 -mt-2.5 leading-relaxed">
+                {rememberMe
+                  ? "You'll stay signed in for 24 hours, even if idle."
+                  : 'Auto sign-out after 30 minutes of inactivity, or at midnight.'}
+              </p>
+
               <button
                 type="submit" disabled={loading}
                 className="w-full flex items-center justify-center gap-2 py-3 rounded-xl text-sm font-bold text-white transition-all mt-2"
@@ -279,6 +352,28 @@ export default function LoginPage() {
         </div>
       </div>
     </div>
+
+    {/* ── Force-logout notice ── */}
+    {logoutNotice && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4"
+        style={{ background: 'rgba(15,23,42,0.55)', backdropFilter: 'blur(4px)' }}>
+        <div className="bg-white rounded-2xl p-8 w-full max-w-sm shadow-2xl">
+          <div className="flex flex-col items-center text-center gap-3">
+            <div className="w-12 h-12 rounded-full bg-amber-50 flex items-center justify-center">
+              <LogOut size={22} className="text-amber-500" />
+            </div>
+            <h2 className="text-lg font-bold text-slate-900">{logoutNotice.title}</h2>
+            <p className="text-sm text-slate-500">{logoutNotice.message}</p>
+            <button
+              onClick={() => setLogoutNotice(null)}
+              className="mt-2 w-full py-2.5 rounded-xl text-sm font-semibold text-white"
+              style={{ background: 'linear-gradient(135deg,#6366f1,#4f46e5)' }}>
+              Got it
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
 
     {/* ── Forgot Password overlay ── */}
     {forgotMode && (
@@ -332,6 +427,46 @@ export default function LoginPage() {
               </button>
             </>
           )}
+        </div>
+      </div>
+    )}
+    {/* ── Two-factor code overlay ── */}
+    {mfaStep && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4"
+        style={{ background: 'rgba(15,23,42,0.55)', backdropFilter: 'blur(4px)' }}>
+        <div className="bg-white rounded-2xl p-8 w-full max-w-sm shadow-2xl">
+          <div className="flex items-center gap-2.5 mb-1">
+            <ShieldCheck size={18} className="text-indigo-500" />
+            <h2 className="text-lg font-bold text-slate-900">Two-factor verification</h2>
+          </div>
+          <p className="text-sm text-slate-400 mb-5">Enter the 6-digit code from your authenticator app.</p>
+          {mfaError && (
+            <div className="flex items-center gap-2 p-3 rounded-xl mb-4 text-sm"
+              style={{ background: '#fef2f2', border: '1px solid #fecaca', color: '#991b1b' }}>
+              <AlertTriangle size={14} className="shrink-0" />{mfaError}
+            </div>
+          )}
+          <form onSubmit={handleVerifyMfa} className="space-y-4">
+            <div>
+              <label className="block text-xs font-semibold text-slate-600 uppercase tracking-wide mb-1.5">Authentication code</label>
+              <input
+                type="text" inputMode="numeric" autoComplete="one-time-code"
+                value={mfaCode} onChange={e => setMfaCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                autoFocus placeholder="000000" maxLength={6}
+                className="w-full px-3.5 py-2.5 rounded-xl text-sm text-slate-900 bg-slate-50 border border-slate-200 outline-none focus:border-indigo-400 focus:ring-2 focus:bg-white tracking-[0.3em] text-center font-mono text-lg"
+              />
+            </div>
+            <button type="submit" disabled={mfaLoading || mfaCode.length !== 6}
+              className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-bold text-white transition-all disabled:opacity-60"
+              style={{ background: mfaLoading ? '#a5b4fc' : 'linear-gradient(135deg,#6366f1,#4f46e5)' }}>
+              {mfaLoading ? <Spinner size={15} /> : 'Verify & sign in'}
+            </button>
+          </form>
+          <button
+            onClick={() => { setMfaStep(null); setMfaCode(''); setMfaError(''); supabase.auth.signOut(); }}
+            className="mt-3 w-full text-center text-xs text-slate-400 hover:text-slate-600 transition-colors">
+            Cancel and go back
+          </button>
         </div>
       </div>
     )}

@@ -1,6 +1,9 @@
 import { useState, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { format, differenceInCalendarDays } from 'date-fns';
+import {
+  format, differenceInCalendarDays, startOfMonth, endOfMonth,
+  startOfWeek, endOfWeek, eachDayOfInterval, isSameMonth, addMonths, subMonths,
+} from 'date-fns';
 import { Plus, CalendarDays, Pencil, X, Check, Ban, Download, Settings2, Trash2, Wallet, AlertTriangle } from 'lucide-react';
 import { useSubscription } from '../context/SubscriptionContext';
 import { fmt } from '../utils/dateTime';
@@ -9,7 +12,7 @@ import { useToast } from '../context/ToastContext';
 import { useAuth } from '../context/AuthContext';
 
 function exportLeaveCSV(list) {
-  const headers = ['Employee Code', 'First Name', 'Last Name', 'Department', 'Leave Type', 'Start Date', 'End Date', 'Reason', 'Status', 'Submitted'];
+  const headers = ['Employee Code', 'First Name', 'Last Name', 'Department', 'Leave Type', 'Start Date', 'End Date', 'Leave Dates', 'Days', 'Reason', 'Status', 'Submitted'];
   const rows = list.map(r => [
     r.employee.employeeCode || '',
     r.employee.firstName,
@@ -18,6 +21,8 @@ function exportLeaveCSV(list) {
     r.leaveType,
     r.startDate,
     r.endDate,
+    Array.isArray(r.dates) && r.dates.length > 0 ? r.dates.join('; ') : '',
+    dayCount(r),
     r.reason || '',
     r.status,
     r.createdAt ? format(new Date(r.createdAt), 'yyyy-MM-dd') : '',
@@ -34,10 +39,24 @@ function exportLeaveCSV(list) {
   URL.revokeObjectURL(url);
 }
 
-function dayCount(startDate, endDate) {
-  if (!startDate) return 0;
-  const n = differenceInCalendarDays(new Date(endDate || startDate), new Date(startDate)) + 1;
+// Prefer the explicit list of picked calendar days (skips weekends/holidays the
+// employee didn't select). Falls back to a start/end range for older requests
+// (e.g. from mobile or ESP32) that don't have a `dates` array yet.
+function dayCount(req) {
+  if (!req) return 0;
+  if (Array.isArray(req.dates) && req.dates.length > 0) return req.dates.length;
+  if (!req.startDate) return 0;
+  const n = differenceInCalendarDays(new Date(req.endDate || req.startDate), new Date(req.startDate)) + 1;
   return n > 0 ? n : 0;
+}
+
+// Expands a legacy start/end range into individual day strings — used only to
+// pre-fill the calendar picker when editing an older range-based request.
+function rangeToDates(start, end) {
+  if (!start) return [];
+  const s = new Date(start), e = new Date(end || start);
+  if (isNaN(s) || isNaN(e) || e < s) return [format(s, 'yyyy-MM-dd')];
+  return eachDayOfInterval({ start: s, end: e }).map(d => format(d, 'yyyy-MM-dd'));
 }
 
 export default function LeavePage() {
@@ -104,49 +123,69 @@ export default function LeavePage() {
     return employee?.leaveBalances?.[typeName] ?? 0;
   }
 
-  function handleApprove(req) {
-    const days = dayCount(req.startDate, req.endDate);
+  async function handleApprove(req) {
+    const days = dayCount(req);
     const typeName = req.leaveType ?? req.type;
     const balance = balanceFor(req.employee, typeName);
-    updateLeaveRequest(req.id, { status: 'approved', resolvedAt: new Date().toISOString() });
-    // Actually deduct the days from the employee's leave balance
-    setEmployeeLeaveBalance(req.employee.id, typeName, balance - days);
-    if (days > balance) {
-      toast(`Leave approved — note: this overdraws ${req.employee.firstName}'s balance (was ${balance} day${balance !== 1 ? 's' : ''})`, 'warning');
-    } else {
-      toast(`Leave approved — ${days} day${days !== 1 ? 's' : ''} deducted from balance`, 'success');
+    try {
+      await updateLeaveRequest(req.id, { status: 'approved', resolvedAt: new Date().toISOString() });
+      // Actually deduct the days from the employee's leave balance
+      await setEmployeeLeaveBalance(req.employee.id, typeName, balance - days);
+      if (days > balance) {
+        toast(`Leave approved — note: this overdraws ${req.employee.firstName}'s balance (was ${balance} day${balance !== 1 ? 's' : ''})`, 'warning');
+      } else {
+        toast(`Leave approved — ${days} day${days !== 1 ? 's' : ''} deducted from balance`, 'success');
+      }
+    } catch (err) {
+      toast(`Couldn't save approval: ${err.message}`, 'error');
     }
   }
 
-  function handleReject(id) {
-    updateLeaveRequest(id, { status: 'rejected', resolvedAt: new Date().toISOString() });
-    toast('Leave rejected', 'warning');
+  async function handleReject(id) {
+    try {
+      await updateLeaveRequest(id, { status: 'rejected', resolvedAt: new Date().toISOString() });
+      toast('Leave rejected', 'warning');
+    } catch (err) {
+      toast(`Couldn't save: ${err.message}`, 'error');
+    }
   }
 
-  function handleCancelConfirm() {
+  async function handleCancelConfirm() {
     const wasApproved = cancelTarget.status === 'approved';
-    updateLeaveRequest(cancelTarget.id, { status: 'cancelled', resolvedAt: new Date().toISOString() });
-    // Restore the balance if the leave was already approved
-    if (wasApproved) {
-      const days = dayCount(cancelTarget.startDate, cancelTarget.endDate);
-      const typeName = cancelTarget.leaveType ?? cancelTarget.type;
-      const currentBalance = balanceFor(cancelTarget.employee, typeName);
-      setEmployeeLeaveBalance(cancelTarget.employee.id, typeName, currentBalance + days);
+    try {
+      await updateLeaveRequest(cancelTarget.id, { status: 'cancelled', resolvedAt: new Date().toISOString() });
+      // Restore the balance if the leave was already approved
+      if (wasApproved) {
+        const days = dayCount(cancelTarget);
+        const typeName = cancelTarget.leaveType ?? cancelTarget.type;
+        const currentBalance = balanceFor(cancelTarget.employee, typeName);
+        await setEmployeeLeaveBalance(cancelTarget.employee.id, typeName, currentBalance + days);
+      }
+      toast(wasApproved ? 'Leave cancelled — balance restored' : 'Leave request cancelled', 'warning');
+      setCancelTarget(null);
+    } catch (err) {
+      toast(`Couldn't save: ${err.message}`, 'error');
     }
-    toast(wasApproved ? 'Leave cancelled — balance restored' : 'Leave request cancelled', 'warning');
-    setCancelTarget(null);
   }
 
-  function handleAdd(form) {
-    addLeaveRequest(form);
-    toast('Leave request submitted', 'success');
-    setAddModal(false);
+  async function handleAdd(form) {
+    try {
+      await addLeaveRequest(form);
+      toast('Leave request submitted', 'success');
+      setAddModal(false);
+    } catch (err) {
+      toast(`Couldn't submit leave request: ${err.message}`, 'error');
+    }
   }
 
-  function handleEdit(form) {
-    updateLeaveRequest(editTarget.id, form);
-    toast('Leave request updated', 'success');
-    setEditTarget(null);
+  async function handleEdit(form) {
+    try {
+      await updateLeaveRequest(editTarget.id, form);
+      toast('Leave request updated', 'success');
+      setEditTarget(null);
+    } catch (err) {
+      toast(`Couldn't save changes: ${err.message}`, 'error');
+    }
   }
 
   return (
@@ -236,7 +275,7 @@ export default function LeavePage() {
                 <tbody>
                   {filtered.map(req => {
                     const typeName = req.leaveType ?? req.type;
-                    const days = dayCount(req.startDate, req.endDate);
+                    const days = dayCount(req);
                     const balance = balanceFor(req.employee, typeName);
                     const wouldOverdraw = req.status === 'pending' && days > balance;
                     return (
@@ -506,15 +545,17 @@ function LeaveModal({ open, onClose, onSave, employees, leaveTypes, title, initi
       ? {
           employeeId: initial.employeeId,
           leaveType: initial.leaveType ?? initial.type ?? defaultType,
-          startDate: initial.startDate,
-          endDate: initial.endDate,
+          // Older requests only have startDate/endDate — expand them into a
+          // day list so editing still shows the right days pre-selected.
+          dates: (Array.isArray(initial.dates) && initial.dates.length > 0)
+            ? initial.dates
+            : rangeToDates(initial.startDate, initial.endDate),
           reason: initial.reason || '',
         }
       : {
           employeeId: '',
           leaveType: defaultType,
-          startDate: format(new Date(), 'yyyy-MM-dd'),
-          endDate: format(new Date(), 'yyyy-MM-dd'),
+          dates: [format(new Date(), 'yyyy-MM-dd')],
           reason: '',
         }
   );
@@ -522,15 +563,21 @@ function LeaveModal({ open, onClose, onSave, employees, leaveTypes, title, initi
 
   const selectedEmployee = employees.find(e => String(e.id) === String(form.employeeId));
   const balance = selectedEmployee?.leaveBalances?.[form.leaveType] ?? 0;
-  const days = dayCount(form.startDate, form.endDate);
+  const days = form.dates.length;
   const wouldOverdraw = selectedEmployee && days > balance;
+
+  function handleSubmit() {
+    if (!form.employeeId || form.dates.length === 0) return;
+    const sorted = [...form.dates].sort();
+    onSave({ ...form, dates: sorted, startDate: sorted[0], endDate: sorted[sorted.length - 1] });
+  }
 
   return (
     <Modal open={open} onClose={onClose} title={title} width="max-w-md"
       footer={
         <>
           <button className="btn-secondary" onClick={onClose}>Cancel</button>
-          <button className="btn-primary" onClick={() => { if (form.employeeId) onSave(form); }}>
+          <button className="btn-primary" onClick={handleSubmit} disabled={!form.employeeId || form.dates.length === 0}>
             {initial ? 'Save Changes' : 'Submit'}
           </button>
         </>
@@ -545,9 +592,12 @@ function LeaveModal({ open, onClose, onSave, employees, leaveTypes, title, initi
             ? leaveTypes.map(l => ({ value: l.name, label: l.name }))
             : [{ value: '', label: 'No leave types configured' }]}
         />
-        <div className="grid grid-cols-2 gap-3">
-          <InputField label="Start Date" type="date" value={form.startDate} onChange={f('startDate')} />
-          <InputField label="End Date" type="date" value={form.endDate} onChange={f('endDate')} />
+        <div>
+          <label className="block text-xs font-semibold text-ink-500 mb-1.5">Leave Dates</label>
+          <p className="text-[11px] text-ink-400 mb-1.5">
+            Click each day being taken off — skip weekends or holidays that shouldn't count.
+          </p>
+          <LeaveDatePicker dates={form.dates} onChange={f('dates')} />
         </div>
         <InputField label="Reason" value={form.reason} onChange={f('reason')} placeholder="Brief description…" />
 
@@ -565,17 +615,78 @@ function LeaveModal({ open, onClose, onSave, employees, leaveTypes, title, initi
   );
 }
 
+// Click-to-toggle month calendar for picking individual leave days. Unlike a
+// start/end range, this lets an employee take e.g. Saturday + Monday off
+// without Sunday in between silently counting as a leave day.
+function LeaveDatePicker({ dates, onChange }) {
+  const selected = useMemo(() => new Set(dates), [dates]);
+  const [viewDate, setViewDate] = useState(() => startOfMonth(dates[0] ? new Date(dates[0]) : new Date()));
+
+  const gridDays = useMemo(() => {
+    const start = startOfWeek(startOfMonth(viewDate));
+    const end   = endOfWeek(endOfMonth(viewDate));
+    return eachDayOfInterval({ start, end });
+  }, [viewDate]);
+
+  function toggleDay(d) {
+    const key = format(d, 'yyyy-MM-dd');
+    const next = new Set(selected);
+    if (next.has(key)) next.delete(key);
+    else next.add(key);
+    onChange([...next].sort());
+  }
+
+  return (
+    <div className="border border-surface-200 rounded-xl p-3">
+      <div className="flex items-center justify-between mb-2">
+        <button type="button" onClick={() => setViewDate(d => subMonths(d, 1))} className="btn-ghost btn-sm p-1 rounded-md text-ink-400 hover:text-ink-700">‹</button>
+        <p className="text-xs font-semibold text-ink-700">{format(viewDate, 'MMMM yyyy')}</p>
+        <button type="button" onClick={() => setViewDate(d => addMonths(d, 1))} className="btn-ghost btn-sm p-1 rounded-md text-ink-400 hover:text-ink-700">›</button>
+      </div>
+      <div className="grid grid-cols-7 gap-y-1 text-center">
+        {['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'].map(d => (
+          <span key={d} className="text-[10px] font-semibold text-ink-400">{d}</span>
+        ))}
+        {gridDays.map(d => {
+          const key = format(d, 'yyyy-MM-dd');
+          const inMonth = isSameMonth(d, viewDate);
+          const isSelected = selected.has(key);
+          return (
+            <button
+              type="button"
+              key={key}
+              onClick={() => toggleDay(d)}
+              className={`text-xs h-7 w-7 rounded-lg flex items-center justify-center mx-auto transition-colors ${
+                isSelected
+                  ? 'bg-brand-600 text-white font-semibold'
+                  : inMonth ? 'text-ink-700 hover:bg-surface-100' : 'text-ink-300 hover:bg-surface-50'
+              }`}
+            >
+              {format(d, 'd')}
+            </button>
+          );
+        })}
+      </div>
+      <div className="flex items-center justify-between mt-2 pt-2 border-t border-surface-100">
+        <button type="button" onClick={() => onChange([])} className="text-[11px] text-brand-600 hover:underline">Clear</button>
+        <span className="text-[11px] text-ink-400">{dates.length} day{dates.length !== 1 ? 's' : ''} selected</span>
+        <button type="button" onClick={() => setViewDate(startOfMonth(new Date()))} className="text-[11px] text-brand-600 hover:underline">Today</button>
+      </div>
+    </div>
+  );
+}
+
 function LeaveTypesModal({ open, onClose, leaveTypes, onAdd, onUpdate, onRemove, toast }) {
   const [newName, setNewName] = useState('');
   const [newDefault, setNewDefault] = useState('5');
   const [editingName, setEditingName] = useState(null);
   const [editValue, setEditValue] = useState('');
 
-  function handleAdd() {
+  async function handleAdd() {
     const name = newName.trim();
     if (!name) return;
     try {
-      onAdd(name, newDefault);
+      await onAdd(name, newDefault);
       toast(`"${name}" added`, 'success');
       setNewName('');
       setNewDefault('5');
@@ -589,15 +700,23 @@ function LeaveTypesModal({ open, onClose, leaveTypes, onAdd, onUpdate, onRemove,
     setEditValue(String(type.defaultBalance));
   }
 
-  function saveEdit() {
-    onUpdate(editingName, { defaultBalance: Number(editValue) || 0 });
-    toast('Leave type updated', 'success');
-    setEditingName(null);
+  async function saveEdit() {
+    try {
+      await onUpdate(editingName, { defaultBalance: Number(editValue) || 0 });
+      toast('Leave type updated', 'success');
+      setEditingName(null);
+    } catch (err) {
+      toast(`Couldn't save: ${err.message}`, 'error');
+    }
   }
 
-  function handleRemove(type) {
-    onRemove(type.name);
-    toast(`"${type.name}" removed`, 'warning');
+  async function handleRemove(type) {
+    try {
+      await onRemove(type.name);
+      toast(`"${type.name}" removed`, 'warning');
+    } catch (err) {
+      toast(`Couldn't remove: ${err.message}`, 'error');
+    }
   }
 
   return (

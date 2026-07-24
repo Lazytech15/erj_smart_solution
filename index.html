@@ -6,6 +6,67 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="AttendMS — Enterprise Attendance Management System" />
     <title>ERJ - Smart Solutions</title>
+
+    <!--
+      Content-Security-Policy
+      ────────────────────────
+      Primary XSS mitigation: even if a malicious script were ever injected
+      (e.g. via a compromised dependency), the browser refuses to execute or
+      connect anything outside this allowlist.
+
+        script-src  'self'            — only our own bundled JS runs. No
+                                         inline <script>, no eval(), no
+                                         third-party script injection.
+        style-src   'self' 'unsafe-inline' + Google Fonts
+                                       — 'unsafe-inline' is required because
+                                         this app renders many React inline
+                                         `style={{...}}` props, which become
+                                         inline style="" attributes in the
+                                         DOM. Low-risk relative to script-src:
+                                         injected CSS can deface a page but
+                                         can't read/exfiltrate localStorage.
+        connect-src 'self' + Supabase (https/wss) + ipapi.co + date.nager.at
+                                       — API calls, realtime subscriptions,
+                                         the IP-geolocation lookup used by
+                                         abac.js's login security checks
+                                         (new-country/new-IP flags), and the
+                                         free Nager.Date public holiday API
+                                         used by the dashboard calendar.
+        img-src     'self' data: blob: https:
+                                       — inline data-URI images, blob: URLs
+                                         (URL.createObjectURL() previews used
+                                         by the avatar/photo upload flow
+                                         before the file is uploaded), and
+                                         any https image (avatars, uploaded
+                                         logos, etc).
+        font-src    Google Fonts.
+        object-src  'none'            — blocks Flash/legacy plugin content.
+        base-uri    'self'            — stops <base> tag hijacking.
+        form-action 'self'            — forms can only submit within the app.
+
+      Note: `frame-ancestors` (clickjacking protection) is intentionally NOT
+      listed here — per spec, browsers ignore frame-ancestors when a CSP is
+      delivered via a <meta> tag; it only works as a real HTTP response
+      header. Set X-Frame-Options: DENY (or CSP frame-ancestors 'none') at
+      your hosting/CDN layer for that protection — see the header examples
+      in SECURITY.md / the platform-specific headers file included alongside
+      this project.
+
+      If you swap Supabase projects, update the connect-src host below to
+      match your project's *.supabase.co URL.
+    -->
+    <meta http-equiv="Content-Security-Policy" content="
+      default-src 'self';
+      script-src 'self';
+      style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+      font-src 'self' https://fonts.gstatic.com;
+      img-src 'self' data: blob: https:;
+      connect-src 'self' https://*.supabase.co wss://*.supabase.co https://ipapi.co https://date.nager.at;
+      object-src 'none';
+      base-uri 'self';
+      form-action 'self';
+    " />
+
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />

@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { NavLink, useNavigate } from "react-router-dom";
+import { NavLink } from "react-router-dom";
 import {
   LayoutDashboard, Clock, Users, CalendarDays, BarChart3,
-  Settings, FileText, Building2, LogOut, Package, Lock,
+  Settings, FileText, Building2, Package, Lock,
+  UserCircle, LifeBuoy,
 } from "lucide-react";
 import { useAuth } from "../../context/AuthContext";
 import { useSubscription, PLANS } from "../../context/SubscriptionContext";
@@ -27,25 +28,43 @@ const NAV = [
   { to: "/app/shifts",      icon: FileText,        label: "Shifts",      roles: ["admin","hr"],            planFeature: "shifts" },
   { to: "/app/departments", icon: Building2,       label: "Departments", roles: ["admin","hr"],            planFeature: "departments" },
   { to: "/app/subscription",icon: Package,         label: "Subscription",roles: ["admin"] },
-  { to: "/app/settings",    icon: Settings,        label: "Settings",    roles: ["admin"] },
 ];
 
-function UserAvatar({ name, size = 64 }) {
-  const initials = (name || "?")
-    .split(" ").slice(0, 2).map(w => w[0]).join("").toUpperCase();
+/* Footer group — account/utility links, kept separate from the main nav
+   and shown below the divider where "Log Out" used to live. Log Out itself
+   was removed from here since it's already reachable from the header's
+   profile dropdown (top-right avatar menu). */
+const FOOTER_NAV = [
+  { to: "/app/profile",  icon: UserCircle, label: "Profile",      roles: ["admin","hr","manager","employee"] },
+  { to: "/app/settings", icon: Settings,   label: "Settings",     roles: ["admin"] },
+  { to: "/app/help",     icon: LifeBuoy,   label: "Help Center",  roles: ["admin","hr","manager","employee"] },
+];
+
+function CompanyBadge({ name, size = 64, src }) {
+  const initial = (name || "?").trim().charAt(0).toUpperCase();
   const colors = ["#4f46e5","#6366f1","#7c3aed","#0891b2","#0d9488"];
   const bg = colors[(name || "").charCodeAt(0) % colors.length];
+  const baseStyle = {
+    width: size, height: size, borderRadius: Math.round(size * 0.26),
+    flexShrink: 0,
+    border: "2px solid rgba(99,102,241,0.35)",
+    boxShadow: "0 0 0 4px rgba(99,102,241,0.1)",
+    transition: "width 220ms cubic-bezier(.4,0,.2,1), height 220ms cubic-bezier(.4,0,.2,1), font-size 220ms",
+  };
+  if (src) {
+    return (
+      <div style={{ ...baseStyle, background: "#fff", display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
+        <img src={src} alt={name || "Company logo"} style={{ width: "100%", height: "100%", objectFit: "contain" }} />
+      </div>
+    );
+  }
   return (
     <div style={{
-      width: size, height: size, borderRadius: "50%", background: bg,
+      ...baseStyle, background: bg,
       display: "flex", alignItems: "center", justifyContent: "center",
       fontSize: size * 0.34, fontWeight: 700, color: "#fff",
-      border: "2px solid rgba(99,102,241,0.35)",
-      flexShrink: 0,
-      boxShadow: "0 0 0 4px rgba(99,102,241,0.1)",
-      transition: "width 220ms cubic-bezier(.4,0,.2,1), height 220ms cubic-bezier(.4,0,.2,1), font-size 220ms",
     }}>
-      {initials}
+      {initial}
     </div>
   );
 }
@@ -66,12 +85,12 @@ function Tooltip({ label }) {
 }
 
 export default function Sidebar() {
-  const { user, logout } = useAuth();
+  const { user } = useAuth();
   const { subscription, trialDaysLeft } = useSubscription();
-  const navigate = useNavigate();
   const [expanded, setExpanded] = useState(false);
 
   const visible = NAV.filter(n => n.roles.includes(user?.role || "employee"));
+  const visibleFooter = FOOTER_NAV.filter(n => n.roles.includes(user?.role || "employee"));
   const collapsed = !expanded;
   const planLimits = subscription?.planId
     ? (PLANS.find(p => p.id === subscription.planId)?.limits ?? {})
@@ -138,11 +157,14 @@ export default function Sidebar() {
       {/* Top glow blob */}
       <div style={S.glow} />
 
-      {/* ── Profile ── */}
+      {/* ── Company ── */}
       <div style={S.profile}>
-        <UserAvatar name={user?.name || "?"} size={collapsed ? 36 : 56} />
-        <div style={S.userName}>{user?.name || "User"}</div>
-        <div style={S.userRole}>{user?.email || user?.role || ""}</div>
+        <CompanyBadge
+          name={subscription?.company?.name}
+          src={subscription?.settings?.companyLogoUrl}
+          size={collapsed ? 36 : 56}
+        />
+        <div style={S.userName}>{subscription?.company?.name || "ERJ Smart Solutions"}</div>
       </div>
 
       <div style={S.divider} />
@@ -179,35 +201,19 @@ export default function Sidebar() {
         })}
       </nav>
 
-      {/* ── Logout ── */}
-      <div style={{
-        padding: "0 8px", marginBottom: 14, zIndex: 1, position: "relative",
-        display: "flex", justifyContent: collapsed ? "center" : "stretch",
-        transition: "justify-content 220ms",
-      }}>
-        <button
-          onClick={() => { logout(); navigate("/login"); }}
-          title="Log Out"
-          style={{
-            width: collapsed ? 48 : "100%", height: 42, border: "none", borderRadius: 12,
-            background: "rgba(239,68,68,0.1)", color: "#f87171", cursor: "pointer",
-            display: "flex", alignItems: "center", justifyContent: "center",
-            gap: collapsed ? 0 : 8, fontSize: 14, fontWeight: 600,
-            transition: "width 220ms cubic-bezier(.4,0,.2,1), gap 220ms, background 0.2s, color 0.2s",
-            overflow: "hidden", flexShrink: 0,
-          }}
-          onMouseEnter={e => { e.currentTarget.style.background = "rgba(239,68,68,0.18)"; e.currentTarget.style.color = "#fca5a5"; }}
-          onMouseLeave={e => { e.currentTarget.style.background = "rgba(239,68,68,0.1)"; e.currentTarget.style.color = "#f87171"; }}
-        >
-          <LogOut size={16} style={{ flexShrink: 0 }} />
-          <span style={{
-            whiteSpace: "nowrap", overflow: "hidden",
-            maxWidth: collapsed ? 0 : 100, opacity: collapsed ? 0 : 1,
-            transition: "max-width 220ms cubic-bezier(.4,0,.2,1), opacity 150ms",
-          }}>
-            Log Out
-          </span>
-        </button>
+      {/* ── Footer nav (Profile / Settings / Help Center) ── */}
+      <div style={{ padding: "4px 8px 10px", zIndex: 1, position: "relative" }}>
+        <div style={{ ...S.divider, margin: "0 8px 6px" }} />
+        {visibleFooter.map(({ to, icon: Icon, label }) => (
+          <NavLink
+            key={to} to={to} title={collapsed ? label : undefined}
+            style={{ textDecoration: "none", position: "relative", display: "flex" }}
+          >
+            {({ isActive }) => (
+              <NavItem icon={Icon} label={label} isActive={isActive} collapsed={collapsed} isLocked={false} />
+            )}
+          </NavLink>
+        ))}
       </div>
     </aside>
   );

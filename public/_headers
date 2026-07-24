@@ -1,0 +1,13 @@
+# Netlify (and some other static hosts) read this file automatically and
+# apply these as real HTTP response headers — delete this file if you're
+# not hosting on Netlify; use vercel.json instead for Vercel.
+#
+# These cover what the <meta> CSP in index.html can't: frame-ancestors
+# (clickjacking) doesn't work via <meta>, only via an actual header.
+
+/*
+  X-Frame-Options: DENY
+  Content-Security-Policy: frame-ancestors 'none'
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: geolocation=(), camera=(), microphone=()

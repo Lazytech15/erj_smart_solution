@@ -38,7 +38,7 @@ export async function getAccount(email) {
   return cached(`account:${email}`, async () => {
     const { data, error } = await supabase
       .from('accounts')
-      .select('auth_uid, email, role, name, employee_id, subscription_id, created_at')
+      .select('auth_uid, email, role, name, employee_id, subscription_id, created_at, avatar_url, two_factor_enabled')
       .eq('email', email)
       .maybeSingle();
     if (error || !data) return null;
@@ -51,6 +51,8 @@ export async function getAccount(email) {
       employeeId:     data.employee_id,
       subscriptionId: data.subscription_id,
       createdAt:      data.created_at,
+      avatarUrl:        data.avatar_url          ?? null,
+      twoFactorEnabled: data.two_factor_enabled  ?? false,
     };
   }, READ_TTL_MS);
 }
@@ -61,14 +63,21 @@ export async function getAccount(email) {
  * `account.id` must be the Supabase Auth UUID (auth_uid).
  */
 export async function putAccount(account) {
-  const { error } = await supabase.from('accounts').upsert({
+  const row = {
     auth_uid:        account.id,
     email:           account.email,
     role:            account.role,
     name:            account.name,
     employee_id:     account.employeeId     ?? null,
     subscription_id: account.subscriptionId ?? null,
-  }, { onConflict: 'auth_uid' });
+  };
+  // Only touch these columns when the caller explicitly passes them, so
+  // routine name/role updates elsewhere in the app don't accidentally
+  // clobber the avatar or 2FA state with `undefined` -> null.
+  if (account.avatarUrl !== undefined)        row.avatar_url = account.avatarUrl;
+  if (account.twoFactorEnabled !== undefined) row.two_factor_enabled = account.twoFactorEnabled;
+
+  const { error } = await supabase.from('accounts').upsert(row, { onConflict: 'auth_uid' });
   if (error) throw error;
   cacheInvalidate(`account:${account.email}`);
 }
@@ -149,8 +158,11 @@ export async function putSubscription(state) {
       settings:           { ...(state.settings ?? {}), autoDepartments: state.autoDepartments ?? [] },
       status:             state.status,
       trial_ends_at:      state.trialEndsAt        ?? null,
-    });
-  if (error) throw error;
+    }, { onConflict: 'subscription_id' });
+  if (error) {
+    console.error('[putSubscription] Supabase write failed:', error.message);
+    throw error;
+  }
   cacheInvalidate(`subscription:${state.subscriptionId}`);
   // attendance_records lives both on `subscriptions` and is read separately
   // via getAttendanceRecords() — keep that cache in sync too.

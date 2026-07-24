@@ -5,6 +5,12 @@ import { cached, cacheInvalidate } from '../utils/cache';
 /**
  * Axios instance for all API calls.
  *
+ * NOTE: this module is not currently imported/used anywhere in the app —
+ * data access goes through `utils/db.js` straight to Supabase. Kept here as
+ * scaffolding in case a custom backend is added later (e.g. for endpoints
+ * Supabase RLS alone can't express). If you don't have a plan to add one,
+ * consider deleting this file entirely to reduce surface area.
+ *
  * Encryption is controlled by VITE_ENCRYPT_PAYLOADS in your .env:
  *   VITE_ENCRYPT_PAYLOADS=true   → AES-256-CBC on every request/response
  *   VITE_ENCRYPT_PAYLOADS=false  → plaintext (useful for local dev/debugging)
@@ -12,21 +18,21 @@ import { cached, cacheInvalidate } from '../utils/cache';
  * The encryption key must also be set:
  *   VITE_ENCRYPTION_KEY=<strong passphrase matching your server's key>
  */
-const ENCRYPT = import.meta.env.VITE_ENCRYPT_PAYLOADS === 'true';
+// const ENCRYPT = import.meta.env.VITE_ENCRYPT_PAYLOADS === 'true';
 
-const api = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || 'http://localhost:3001/api',
-  timeout: 10000,
-  headers: { 'Content-Type': 'application/json' },
-});
+// const api = axios.create({
+//   baseURL: import.meta.env.VITE_API_URL || 'http://localhost:3001/api',
+//   timeout: 10000,
+//   headers: { 'Content-Type': 'application/json' },
+// });
 
-// ── Request interceptor — attach auth token + encrypt outbound payload ────────
+// ── Request interceptor — encrypt outbound payload ────────────────────────────
+// (Previously also attached a Bearer token read from localStorage's
+// 'attms_token' key — removed since nothing in the app ever sets that key;
+// it was leftover from an earlier auth approach. Auth for real requests goes
+// through Supabase's own client, which attaches its session token itself.)
 api.interceptors.request.use(
   async (config) => {
-    // Attach JWT if present
-    const token = localStorage.getItem('attms_token');
-    if (token) config.headers.Authorization = `Bearer ${token}`;
-
     // Encrypt body when enabled and there is a body to encrypt
     if (ENCRYPT && config.data != null) {
       try {

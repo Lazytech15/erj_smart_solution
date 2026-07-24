@@ -27,11 +27,12 @@ export default function MobileNav({ open, onClose }) {
     ? (PLANS.find(p => p.id === subscription.planId)?.limits ?? {})
     : {};
 
-  const initials = (user?.name || '?')
-    .split(' ').slice(0, 2).map(w => w[0]).join('').toUpperCase();
+  const companyName = subscription?.company?.name || 'ERJ Smart Solutions';
+  const companyInitial = companyName.trim().charAt(0).toUpperCase();
+  const companyLogoUrl = subscription?.settings?.companyLogoUrl;
 
   const colors = ['#4f46e5','#6366f1','#7c3aed','#0891b2','#0d9488'];
-  const avatarBg = colors[(user?.name || '').charCodeAt(0) % colors.length];
+  const avatarBg = colors[companyName.charCodeAt(0) % colors.length];
 
   if (!open) return null;
 
@@ -67,24 +68,32 @@ export default function MobileNav({ open, onClose }) {
 
         {/* ── Header row — display only, no dropdown ── */}
         <div className="flex items-center gap-2.5 px-4 pt-4 pb-3 relative z-10 min-w-0">
-          {/* Avatar */}
-          <div style={{
-            width: 36, height: 36, borderRadius: '50%', background: avatarBg,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontSize: 12, fontWeight: 700, color: '#fff', flexShrink: 0,
-            border: '2px solid rgba(99,102,241,0.35)',
-            boxShadow: '0 0 0 3px rgba(99,102,241,0.1)',
-          }}>
-            {initials}
-          </div>
+          {/* Company logo */}
+          {companyLogoUrl ? (
+            <div style={{
+              width: 36, height: 36, borderRadius: 10, background: '#fff', flexShrink: 0,
+              border: '2px solid rgba(99,102,241,0.35)',
+              boxShadow: '0 0 0 3px rgba(99,102,241,0.1)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden',
+            }}>
+              <img src={companyLogoUrl} alt={companyName} style={{ width: '100%', height: '100%', objectFit: 'contain' }} />
+            </div>
+          ) : (
+            <div style={{
+              width: 36, height: 36, borderRadius: 10, background: avatarBg,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 14, fontWeight: 700, color: '#fff', flexShrink: 0,
+              border: '2px solid rgba(99,102,241,0.35)',
+              boxShadow: '0 0 0 3px rgba(99,102,241,0.1)',
+            }}>
+              {companyInitial}
+            </div>
+          )}
 
-          {/* Name + email */}
+          {/* Company name */}
           <div className="min-w-0 flex-1">
             <p style={{ color: '#fff', fontWeight: 700, fontSize: 13, lineHeight: 1.3, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-              {user?.name || 'User'}
-            </p>
-            <p style={{ color: 'rgba(255,255,255,0.38)', fontSize: 11, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-              {user?.email || user?.role || ''}
+              {companyName}
             </p>
           </div>
         </div>

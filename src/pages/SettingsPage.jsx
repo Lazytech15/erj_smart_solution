@@ -1,9 +1,36 @@
-import { useState } from 'react';
-import { Shield, Bell, Clock, Key, Globe, Save, Mail, MessageSquare, Lock, ArrowUpRight, Zap } from 'lucide-react';
+import { useState, useRef } from 'react';
+import { Shield, Bell, Clock, Key, Globe, Save, Mail, MessageSquare, Lock, ArrowUpRight, Zap, Upload, X as XIcon, Image as ImageIcon } from 'lucide-react';
 import { SectionHeader, InputField, SelectField, Modal } from '../components/ui';
 import { useToast } from '../context/ToastContext';
 import { useSubscription, PLANS } from '../context/SubscriptionContext';
 import { useNavigate } from 'react-router-dom';
+import { supabase } from '../utils/supabase';
+
+/* ── convertToWebP: browser-side downscale/compress, mirrors the avatar/
+ *  employee-photo upload flow elsewhere in the app. ── */
+async function convertToWebP(file, maxSizePx = 512) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const scale = Math.min(1, maxSizePx / Math.max(img.width, img.height));
+      const w = Math.round(img.width * scale);
+      const h = Math.round(img.height * scale);
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, w, h);
+      canvas.toBlob(blob => {
+        if (!blob) { reject(new Error('WebP conversion failed')); return; }
+        resolve(new File([blob], file.name.replace(/\.[^.]+$/, '.webp'), { type: 'image/webp' }));
+      }, 'image/webp', 0.9);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Image load failed')); };
+    img.src = url;
+  });
+}
 
 const PLAN_ORDER = ['free_trial', 'starter', 'growth', 'enterprise'];
 
@@ -91,9 +118,47 @@ export default function SettingsPage() {
     mobileClockIn:   saved.mobileClockIn   ?? true,
     geoFencing:      saved.geoFencing      ?? false,
     maxLeavePerMonth:saved.maxLeavePerMonth|| '5',
+    companyLogoUrl:  saved.companyLogoUrl  || null,
   });
 
   const set = k => v => setSettings(p => ({ ...p, [k]: v }));
+
+  // ── Company logo upload ───────────────────────────────────────────────
+  const logoInputRef = useRef(null);
+  const [logoUploading, setLogoUploading] = useState(false);
+  const [logoError, setLogoError] = useState('');
+
+  async function handleLogoChange(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith('image/')) { setLogoError('Please select an image file.'); return; }
+    if (file.size > 8 * 1024 * 1024) { setLogoError('Image must be under 8 MB.'); return; }
+    if (!subscription?.subscriptionId) { setLogoError('No company found for this account.'); return; }
+
+    setLogoError('');
+    setLogoUploading(true);
+    try {
+      const webp = await convertToWebP(file, 512);
+      const path = `company-logos/${subscription.subscriptionId}_${Date.now()}.webp`;
+      const { error: uploadError } = await supabase.storage
+        .from('company-logos')
+        .upload(path, webp, { upsert: true, contentType: 'image/webp' });
+      if (uploadError) throw uploadError;
+      const { data } = supabase.storage.from('company-logos').getPublicUrl(path);
+      set('companyLogoUrl')(data.publicUrl);
+      toast('Logo uploaded — click "Save Changes" to apply it.', 'info');
+    } catch (err) {
+      setLogoError(err.message || 'Upload failed.');
+    } finally {
+      setLogoUploading(false);
+      if (logoInputRef.current) logoInputRef.current.value = '';
+    }
+  }
+
+  function handleRemoveLogo() {
+    set('companyLogoUrl')(null);
+    setLogoError('');
+  }
 
   // Confirmation modal state for enabling notifications
   const [notifConfirm, setNotifConfirm] = useState(null); // { type: 'email'|'sms' }
@@ -152,6 +217,50 @@ export default function SettingsPage() {
         {/* ── Company Settings ─────────────────────────────── */}
         <SECTION icon={Globe} title="Company Settings">
           <div>
+            <label className="label">Company Logo</label>
+            <div className="flex items-center gap-4">
+              <div className="relative shrink-0">
+                {settings.companyLogoUrl ? (
+                  <div className="relative w-16 h-16 rounded-xl overflow-hidden border-2 border-surface-200 bg-white flex items-center justify-center">
+                    <img src={settings.companyLogoUrl} alt="Company logo" className="w-full h-full object-contain" />
+                    <button
+                      type="button"
+                      onClick={handleRemoveLogo}
+                      className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 hover:opacity-100 transition-opacity"
+                      title="Remove logo"
+                    >
+                      <XIcon size={14} className="text-white" />
+                    </button>
+                  </div>
+                ) : (
+                  <div className="w-16 h-16 rounded-xl border-2 border-dashed border-surface-300 bg-surface-50 flex items-center justify-center">
+                    <ImageIcon size={18} className="text-ink-300" />
+                  </div>
+                )}
+              </div>
+              <div className="flex-1">
+                <button
+                  type="button"
+                  onClick={() => logoInputRef.current?.click()}
+                  disabled={logoUploading}
+                  className="flex items-center gap-2 px-3 py-2 rounded-xl border border-surface-300 text-xs font-semibold text-ink-600 hover:border-brand-400 hover:text-brand-600 hover:bg-brand-50 transition-all disabled:opacity-50"
+                >
+                  <Upload size={13} />
+                  {logoUploading ? 'Uploading…' : settings.companyLogoUrl ? 'Change logo' : 'Upload logo'}
+                </button>
+                <p className="text-[10px] text-ink-400 mt-1">Shown in the sidebar · JPG, PNG, or WebP · max 8 MB</p>
+                {logoError && <p className="text-xs text-danger-600 mt-1">{logoError}</p>}
+              </div>
+              <input
+                ref={logoInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={handleLogoChange}
+              />
+            </div>
+          </div>
+          <div>
             <label className="label">Company Name</label>
             <input className="input" value={subscription?.company?.name || ''} readOnly />
           </div>
@@ -172,7 +281,12 @@ export default function SettingsPage() {
         {/* ── Attendance Rules ─────────────────────────────── */}
         <SECTION icon={Clock} title="Attendance Rules">
           <InputField label="Late Threshold (minutes)" type="number" value={settings.lateThreshold} onChange={set('lateThreshold')} />
-          <InputField label="Overtime Minimum (minutes)" type="number" value={settings.overtimeMin} onChange={set('overtimeMin')} />
+          <div>
+            <InputField label="Overtime Minimum (minutes)" type="number" value={settings.overtimeMin} onChange={set('overtimeMin')} />
+            <p className="text-[10px] text-ink-400 mt-1">
+              Minutes worked past an employee's assigned shift end before it's flagged as overtime.
+            </p>
+          </div>
           <InputField label="Max Leave Days per Month" type="number" value={settings.maxLeavePerMonth} onChange={set('maxLeavePerMonth')} />
           <Toggle label="Auto Clock-Out at Shift End" description="System automatically records clock-out if employee forgets"
             value={settings.autoClockout} onChange={set('autoClockout')} />

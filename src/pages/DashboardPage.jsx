@@ -1,11 +1,12 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { format, subDays, differenceInCalendarDays, parseISO, startOfMonth, endOfMonth, eachDayOfInterval } from 'date-fns';
-import { Users, Clock, UserX, CalendarCheck, TrendingUp, CheckCircle, UserCheck, Timer, ArrowRight, CalendarDays, LogIn, LogOut, Briefcase, Sun, AlertCircle } from 'lucide-react';
-import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, BarChart, Bar, Cell } from 'recharts';
+import { Users, Clock, UserX, CalendarCheck, TrendingUp, CheckCircle, UserCheck, Timer, ArrowRight, CalendarDays, LogIn, LogOut, Briefcase, Sun, AlertCircle, Building2, ChevronDown, Search } from 'lucide-react';
+import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, BarChart, Bar, Cell, PieChart, Pie  } from 'recharts';
 import { useAuth } from '../context/AuthContext';
 import { useSubscription } from '../context/SubscriptionContext';
 import { fmt } from '../utils/dateTime';
 import { StatCard, StatusBadge, Avatar, SectionHeader, ProgressBar } from '../components/ui';
+import MiniCalendar from '../components/Calendar';
 import { useNavigate } from 'react-router-dom';
 
 const PIE_COLORS = ['#10b981', '#f59e0b', '#ef4444', '#3b82f6'];
@@ -265,28 +266,31 @@ function EmployeeDashboard({ user, subscription, navigate }) {
         )}
       </div>
 
-      {/* My profile summary */}
-      {empProfile && (
-        <div className="card p-4">
-          <p className="text-xs font-semibold text-ink-700 mb-3">My Profile</p>
-          <div className="flex items-center gap-4">
-            <Avatar name={`${empProfile.firstName} ${empProfile.lastName}`} color={empProfile.avatarColor} size="lg" src={empProfile.profilePhotoUrl} />
-            <div className="flex-1 min-w-0 grid grid-cols-2 gap-x-6 gap-y-1">
-              {[
-                ['Role',       empProfile.role],
-                ['Department', empProfile.department],
-                ['Employee ID', empProfile.employeeCode],
-                ['Start Date', empProfile.joinDate ? fmt.date(empProfile.joinDate) : '—'],
-              ].map(([label, val]) => (
-                <div key={label}>
-                  <p className="text-[10px] text-ink-400">{label}</p>
-                  <p className="text-xs font-semibold text-ink-800 truncate">{val || '—'}</p>
-                </div>
-              ))}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <MiniCalendar leaveRequests={myLeave} employees={employees} />
+        {/* My profile summary */}
+        {empProfile && (
+          <div className="card p-4 lg:col-span-2 h-fit">
+            <p className="text-xs font-semibold text-ink-700 mb-3">My Profile</p>
+            <div className="flex items-center gap-4">
+              <Avatar name={`${empProfile.firstName} ${empProfile.lastName}`} color={empProfile.avatarColor} size="lg" src={empProfile.profilePhotoUrl} />
+              <div className="flex-1 min-w-0 grid grid-cols-2 gap-x-6 gap-y-1">
+                {[
+                  ['Role',       empProfile.role],
+                  ['Department', empProfile.department],
+                  ['Employee ID', empProfile.employeeCode],
+                  ['Start Date', empProfile.joinDate ? fmt.date(empProfile.joinDate) : '—'],
+                ].map(([label, val]) => (
+                  <div key={label}>
+                    <p className="text-[10px] text-ink-400">{label}</p>
+                    <p className="text-xs font-semibold text-ink-800 truncate">{val || '—'}</p>
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }
@@ -357,93 +361,396 @@ function AdminDashboard({ user, can, subscription, currentPlan, seatsUsed, navig
             <StatCard label="Pending Leave"   value={pendingLeave}          icon={CalendarCheck} color="info"    onClick={() => navigate('/app/leave?status=pending')} />
           </div>
 
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-            <div className="card p-4 col-span-2">
-              <p className="text-xs font-semibold text-ink-700 mb-3">Attendance — Last 7 Days</p>
-              {attendanceRecords.length === 0 ? (
-                <div className="h-40 flex items-center justify-center text-xs text-ink-300">
-                  No attendance data yet. Records will appear here once employees clock in.
-                </div>
-              ) : (
-                <ResponsiveContainer width="100%" height={160}>
-                  <AreaChart data={weekTrend} margin={{ top: 4, right: 4, left: -24, bottom: 0 }}>
-                    <XAxis dataKey="day" tick={{ fontSize: 10 }} axisLine={false} tickLine={false} />
-                    <YAxis tick={{ fontSize: 10 }} axisLine={false} tickLine={false} />
-                    <Tooltip contentStyle={{ fontSize: 11, borderRadius: 8 }} />
-                    <Area type="monotone" dataKey="present" stroke="#10b981" fill="#d1fae5" strokeWidth={2} name="Present" />
-                    <Area type="monotone" dataKey="late"    stroke="#f59e0b" fill="#fef3c7" strokeWidth={2} name="Late"    />
-                  </AreaChart>
-                </ResponsiveContainer>
-              )}
-            </div>
-
-            <div className="card p-4">
-              <p className="text-xs font-semibold text-ink-700 mb-3">Today's Summary</p>
-              {pieData.length === 0 ? (
-                <div className="h-40 flex items-center justify-center text-xs text-ink-300 text-center">
-                  No attendance recorded for today yet.
-                </div>
-              ) : (
-                <>
-                  <ResponsiveContainer width="100%" height={140}>
-                    <BarChart data={pieData} margin={{ top:4, right:4, left:-24, bottom:0 }}>
-                      <XAxis dataKey="name" tick={{ fontSize: 10 }} axisLine={false} tickLine={false} />
-                      <YAxis tick={{ fontSize: 10 }} axisLine={false} tickLine={false} />
-                      <Tooltip contentStyle={{ fontSize: 11, borderRadius: 8 }} />
-                      <Bar dataKey="value" radius={[4,4,0,0]}>
-                        {pieData.map((_, i) => <Cell key={i} fill={PIE_COLORS[i % PIE_COLORS.length]} />)}
-                      </Bar>
-                    </BarChart>
-                  </ResponsiveContainer>
-                  <div className="space-y-1 mt-2">
-                    {pieData.map((d, i) => (
-                      <div key={d.name} className="flex items-center gap-2 text-xs">
-                        <span className="w-2 h-2 rounded-full shrink-0" style={{ background: PIE_COLORS[i % PIE_COLORS.length] }} />
-                        <span className="text-ink-600 flex-1">{d.name}</span>
-                        <span className="font-semibold text-ink-800">{d.value}</span>
-                      </div>
-                    ))}
-                  </div>
-                </>
-              )}
-            </div>
-          </div>
-
-          <div className="card p-4">
-            <div className="flex items-center justify-between mb-3">
-              <p className="text-xs font-semibold text-ink-700">Recent Employees</p>
-              <button onClick={() => navigate('/app/employees')} className="text-xs text-brand-600 hover:underline flex items-center gap-1">
-                View all <ArrowRight size={11} />
-              </button>
-            </div>
-            <div className="space-y-2">
-              {employees.slice(-5).reverse().map(emp => (
-                <div key={emp.id} className="flex items-center gap-3 py-1.5">
-                  <Avatar name={`${emp.firstName} ${emp.lastName}`} color={emp.avatarColor} size="sm" src={emp.profilePhotoUrl} />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-xs font-semibold text-ink-800 truncate">{emp.firstName} {emp.lastName}</p>
-                    <p className="text-[11px] text-ink-400 truncate">{emp.role} · {emp.department}</p>
-                  </div>
-                  <StatusBadge status={emp.status} />
-                </div>
-              ))}
-            </div>
-          </div>
+          <DashboardOverview
+            employees={activeEmployees}
+            attendanceRecords={attendanceRecords}
+            todayRecs={todayRecs}
+            leaveRequests={leaveRequests}
+            departments={subscription?.departments || []}
+            navigate={navigate}
+          />
         </>
       )}
 
-      {currentPlan && (
-        <div className="card p-4">
-          <div className="flex items-center justify-between mb-2">
-            <p className="text-xs font-semibold text-ink-700">Plan Usage · {currentPlan.name}</p>
-            <button onClick={() => navigate('/app/subscription')} className="text-xs text-brand-600 hover:underline">Manage</button>
+      <div className="card p-4">
+        {currentPlan && (
+          <>
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-xs font-semibold text-ink-700">Plan Usage · {currentPlan.name}</p>
+              <button onClick={() => navigate('/app/subscription')} className="text-xs text-brand-600 hover:underline">Manage</button>
+            </div>
+            <ProgressBar
+              value={currentPlan.maxSeats === Infinity ? 5 : Math.round((seatsUsed / currentPlan.maxSeats) * 100)}
+              label={currentPlan.maxSeats === Infinity ? `${seatsUsed} employees (unlimited)` : `${seatsUsed} / ${currentPlan.maxSeats} seats used`}
+            />
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────
+   Dashboard Overview — Attendance chart + Departments + Logged-in list
+───────────────────────────────────────────── */
+const DEPT_COLORS = ['#4f6ef7', '#f59e0b', '#10b981', '#ef4444', '#8b5cf6', '#06b6d4'];
+
+function DashboardOverview({ employees, attendanceRecords, todayRecs, leaveRequests, departments, navigate }) {
+  const [monthOffset, setMonthOffset] = useState(0);
+  const [viewMode, setViewMode]       = useState('month'); // 'month' | 'year'
+  const [selectedDept, setSelectedDept] = useState('All Departments');
+  const [tab, setTab] = useState('loggedIn'); // loggedIn | onTime | late
+  const [search, setSearch] = useState('');
+
+  const monthDate  = useMemo(() => {
+    const d = new Date();
+    d.setMonth(d.getMonth() - monthOffset);
+    return d;
+  }, [monthOffset]);
+
+  // Daily on-time vs late counts for the current month (weekday buckets, like the reference chart)
+  const monthTrend = useMemo(() => {
+    const start = startOfMonth(monthDate);
+    const end   = endOfMonth(monthDate);
+    const days  = eachDayOfInterval({ start, end }).filter(d => d <= new Date() || monthOffset > 0);
+    return days.map(d => {
+      const dateStr = format(d, 'yyyy-MM-dd');
+      const recs    = attendanceRecords.filter(r => r.date === dateStr);
+      return {
+        day:    format(d, 'd-EEE'),
+        label:  format(d, 'EEE'),
+        onTime: recs.filter(r => r.status === 'present').length,
+        late:   recs.filter(r => r.status === 'late').length,
+      };
+    }).slice(-10); // keep the chart readable
+  }, [attendanceRecords, monthDate, monthOffset]);
+
+  // On-time vs late per month, for the whole year (Jan → Dec)
+  const yearTrend = useMemo(() => {
+    const year = monthDate.getFullYear();
+    return Array.from({ length: 12 }, (_, i) => {
+      const recs = attendanceRecords.filter(r => r.date?.startsWith(`${year}-${String(i + 1).padStart(2, '0')}`));
+      return {
+        label:  format(new Date(year, i, 1), 'MMM'),
+        onTime: recs.filter(r => r.status === 'present').length,
+        late:   recs.filter(r => r.status === 'late').length,
+      };
+    });
+  }, [attendanceRecords, monthDate]);
+
+  const chartData = viewMode === 'year' ? yearTrend : monthTrend;
+
+  // On-time vs late split — computed separately for month and year so both pies can render together
+  const toPieData = (rows) => {
+    const totals = rows.reduce((acc, d) => ({ onTime: acc.onTime + d.onTime, late: acc.late + d.late }), { onTime: 0, late: 0 });
+    return [
+      { name: 'On-time', value: totals.onTime, color: '#4f6ef7' },
+      { name: 'Late',     value: totals.late,   color: '#fbbf24' },
+    ].filter(d => d.value > 0);
+  };
+  const monthPieData = useMemo(() => toPieData(monthTrend), [monthTrend]);
+  const yearPieData  = useMemo(() => toPieData(yearTrend),  [yearTrend]);
+
+  // Per-department breakdown (based on today's attendance)
+  const deptStats = useMemo(() => {
+    return (departments || []).map(dept => {
+      const deptEmployees = employees.filter(e => e.department === dept);
+      const deptIds       = new Set(deptEmployees.map(e => String(e.id)));
+      const deptTodayRecs = todayRecs.filter(r => deptIds.has(String(r.employeeId)));
+      const onTime = deptTodayRecs.filter(r => r.status === 'present').length;
+      const late   = deptTodayRecs.filter(r => r.status === 'late').length;
+      const leave  = (leaveRequests || []).filter(r => r.status === 'approved' && deptIds.has(String(r.employeeId))
+        && r.startDate <= format(new Date(), 'yyyy-MM-dd') && (r.endDate || r.startDate) >= format(new Date(), 'yyyy-MM-dd')).length;
+      return { name: dept, total: deptEmployees.length, onTime, late, leave };
+    });
+  }, [departments, employees, todayRecs, leaveRequests]);
+
+  // Employees "logged in" today (have a record), filtered by dept + tab + search
+  const loggedInList = useMemo(() => {
+    return employees
+      .filter(e => selectedDept === 'All Departments' || e.department === selectedDept)
+      .map(e => ({ emp: e, rec: todayRecs.find(r => String(r.employeeId) === String(e.id)) }))
+      .filter(({ rec }) => !!rec)
+      .filter(({ rec }) => tab === 'loggedIn' || (tab === 'onTime' && rec.status === 'present') || (tab === 'late' && rec.status === 'late'))
+      .filter(({ emp }) => !search.trim() || `${emp.firstName} ${emp.lastName}`.toLowerCase().includes(search.trim().toLowerCase()))
+      .sort((a, b) => (b.rec?.clockIn || '').localeCompare(a.rec?.clockIn || ''));
+  }, [employees, todayRecs, selectedDept, tab, search]);
+
+  const loggedInTotal = employees.filter(e => todayRecs.find(r => String(r.employeeId) === String(e.id))).length;
+  const onTimeTotal   = employees.filter(e => todayRecs.find(r => String(r.employeeId) === String(e.id) && r.status === 'present')).length;
+  const lateTotal     = employees.filter(e => todayRecs.find(r => String(r.employeeId) === String(e.id) && r.status === 'late')).length;
+
+  // Leave requests today, for the "Today's Overview" panel filling out the employee list column
+  const onLeaveToday = useMemo(() => {
+    const todayStr = format(new Date(), 'yyyy-MM-dd');
+    return (leaveRequests || []).filter(r => r.status === 'approved' && r.startDate <= todayStr && (r.endDate || r.startDate) >= todayStr);
+  }, [leaveRequests]);
+  const absentToday = Math.max(0, employees.length - loggedInTotal - onLeaveToday.length);
+
+  // Most recent leave requests, for filling out the employee-list column
+  const recentLeaveRequests = useMemo(() => {
+    return [...(leaveRequests || [])]
+      .sort((a, b) => new Date(b.createdAt || b.startDate) - new Date(a.createdAt || a.startDate))
+      .slice(0, 4)
+      .map(r => ({ ...r, emp: employees.find(e => String(e.id) === String(r.employeeId)) }));
+  }, [leaveRequests, employees]);
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+      {/* Attendance Status chart */}
+      <div className="card p-4 lg:col-span-5">
+        <div className="flex items-center justify-between mb-3 gap-2">
+          <p className="text-xs font-semibold text-ink-700">
+            Attendance Status · {viewMode === 'year' ? format(monthDate, 'yyyy') : format(monthDate, 'MMM yyyy')}
+          </p>
+          <div className="flex items-center gap-2">
+            <div className="flex items-center rounded-lg border border-surface-200 p-0.5">
+              <button
+                onClick={() => setViewMode('month')}
+                className={`px-2 py-1 text-[10px] font-semibold rounded-md transition-colors ${viewMode === 'month' ? 'bg-brand-600 text-white' : 'text-ink-400 hover:text-ink-600'}`}
+              >
+                Monthly
+              </button>
+              <button
+                onClick={() => setViewMode('year')}
+                className={`px-2 py-1 text-[10px] font-semibold rounded-md transition-colors ${viewMode === 'year' ? 'bg-brand-600 text-white' : 'text-ink-400 hover:text-ink-600'}`}
+              >
+                Yearly
+              </button>
+            </div>
+            <div className="flex items-center gap-1">
+              <button onClick={() => setMonthOffset(o => o + 1)} className="btn-ghost p-1 rounded-md text-[11px]">‹</button>
+              <button onClick={() => setMonthOffset(o => Math.max(0, o - 1))} className="btn-ghost p-1 rounded-md text-[11px]">›</button>
+            </div>
           </div>
-          <ProgressBar
-            value={currentPlan.maxSeats === Infinity ? 5 : Math.round((seatsUsed / currentPlan.maxSeats) * 100)}
-            label={currentPlan.maxSeats === Infinity ? `${seatsUsed} employees (unlimited)` : `${seatsUsed} / ${currentPlan.maxSeats} seats used`}
+        </div>
+        <div className="flex items-center gap-4 mb-2">
+          <span className="flex items-center gap-1.5 text-[10px] text-ink-500"><span className="w-2 h-2 rounded-full bg-brand-500" />On-time</span>
+          <span className="flex items-center gap-1.5 text-[10px] text-ink-500"><span className="w-2 h-2 rounded-full bg-amber-300" />Late</span>
+        </div>
+        {attendanceRecords.length === 0 ? (
+          <div className="h-48 flex items-center justify-center text-xs text-ink-300 text-center px-4">
+            No attendance data yet. Records will appear here once employees clock in.
+          </div>
+        ) : (
+          <>
+            <ResponsiveContainer width="100%" height={190}>
+              <BarChart data={chartData} margin={{ top: 4, right: 4, left: -20, bottom: 0 }} barGap={4}>
+                <XAxis dataKey="label" tick={{ fontSize: 10 }} axisLine={false} tickLine={false} />
+                <YAxis tick={{ fontSize: 10 }} axisLine={false} tickLine={false} />
+                <Tooltip contentStyle={{ fontSize: 11, borderRadius: 8 }} cursor={{ fill: 'rgba(79,110,247,0.05)' }} />
+                <Bar dataKey="onTime" name="On-time" fill="#4f6ef7" radius={[4, 4, 0, 0]} maxBarSize={16} />
+                <Bar dataKey="late"   name="Late"    fill="#fde68a" radius={[4, 4, 0, 0]} maxBarSize={16} />
+              </BarChart>
+            </ResponsiveContainer>
+
+            {/* On-time vs late split — Monthly and Yearly stacked vertically */}
+            <div className="mt-2 pt-3 border-t border-surface-100 space-y-4">
+              {[
+                { label: 'Monthly Split', data: monthPieData },
+                { label: 'Yearly Split',  data: yearPieData  },
+              ].map(({ label, data }) => (
+                <div key={label} className="flex items-center gap-4">
+                  {data.length === 0 ? (
+                    <p className="text-xs text-ink-300 py-3 w-full text-center">No {label.toLowerCase()} records yet.</p>
+                  ) : (
+                    <>
+                      <ResponsiveContainer width={90} height={90}>
+                        <PieChart>
+                          <Pie data={data} dataKey="value" nameKey="name" innerRadius={25} outerRadius={42} paddingAngle={2}>
+                            {data.map((d, i) => <Cell key={i} fill={d.color} />)}
+                          </Pie>
+                          <Tooltip contentStyle={{ fontSize: 11, borderRadius: 8 }} />
+                        </PieChart>
+                      </ResponsiveContainer>
+                      <div className="flex-1 space-y-2">
+                        <p className="text-[10px] font-semibold text-ink-400 uppercase tracking-wide">{label}</p>
+                        {data.map(d => {
+                          const total = data.reduce((s, x) => s + x.value, 0);
+                          const pct   = total > 0 ? Math.round((d.value / total) * 100) : 0;
+                          return (
+                            <div key={d.name} className="flex items-center gap-2 text-xs">
+                              <span className="w-2 h-2 rounded-full shrink-0" style={{ background: d.color }} />
+                              <span className="text-ink-600 flex-1">{d.name}</span>
+                              <span className="font-semibold text-ink-800">{d.value}</span>
+                              <span className="text-ink-300 w-8 text-right">{pct}%</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </>
+                  )}
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* All Departments + Calendar */}
+      <div className="lg:col-span-3 space-y-4">
+        <div className="card p-4">
+          <div className="flex items-center justify-between mb-3">
+            <p className="text-xs font-semibold text-ink-700">All Departments</p>
+            <button onClick={() => navigate('/app/departments')} className="text-[11px] text-brand-600 hover:underline">Manage</button>
+          </div>
+          {deptStats.length === 0 ? (
+            <div className="py-10 flex flex-col items-center text-center">
+              <Building2 size={20} className="text-ink-300 mb-2" />
+              <p className="text-xs text-ink-300">No departments yet.</p>
+            </div>
+          ) : (
+            <div className="space-y-2 max-h-[260px] overflow-y-auto pr-1">
+              {deptStats.map((d, i) => (
+                <button
+                  key={d.name}
+                  onClick={() => setSelectedDept(d.name)}
+                  className={`w-full text-left rounded-xl border p-3 transition-colors ${
+                    selectedDept === d.name ? 'border-brand-300 bg-brand-50/50' : 'border-surface-200 hover:bg-surface-50'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="flex items-center gap-1.5 text-[11px] font-semibold text-ink-700 truncate">
+                      <Building2 size={12} style={{ color: DEPT_COLORS[i % DEPT_COLORS.length] }} />
+                      {d.name}
+                    </span>
+                    <span className="text-base font-bold text-ink-900">{d.total}</span>
+                  </div>
+                  <div className="flex items-center gap-3 text-[10px] text-ink-400">
+                    <span>On-time <b className="text-ink-700">{String(d.onTime).padStart(2, '0')}</b></span>
+                    <span>Late <b className="text-ink-700">{String(d.late).padStart(2, '0')}</b></span>
+                    <span>Leave <b className="text-ink-700">{String(d.leave).padStart(2, '0')}</b></span>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <MiniCalendar leaveRequests={leaveRequests} employees={employees} />
+      </div>
+
+      {/* Select Department — logged in / on time / late employee list, plus recent leave requests */}
+      <div className="lg:col-span-4 space-y-4">
+      <div className="card p-4">
+        <div className="flex items-center justify-between mb-2">
+          <div className="relative">
+            <select
+              value={selectedDept}
+              onChange={e => setSelectedDept(e.target.value)}
+              className="text-xs font-semibold text-ink-700 bg-transparent pr-5 outline-none appearance-none cursor-pointer"
+            >
+              <option>All Departments</option>
+              {departments.map(d => <option key={d}>{d}</option>)}
+            </select>
+            <ChevronDown size={12} className="absolute right-0 top-1 text-ink-400 pointer-events-none" />
+          </div>
+        </div>
+
+        <div className="flex items-center gap-1 mb-3 border-b border-surface-100">
+          {[
+            ['loggedIn', 'Logged in', loggedInTotal],
+            ['onTime',   'On Time',   onTimeTotal],
+            ['late',     'Late',      lateTotal],
+          ].map(([key, label, count]) => (
+            <button
+              key={key}
+              onClick={() => setTab(key)}
+              className={`px-2.5 py-2 text-[11px] font-semibold border-b-2 -mb-px transition-colors ${
+                tab === key ? 'border-brand-500 text-brand-600' : 'border-transparent text-ink-400 hover:text-ink-600'
+              }`}
+            >
+              {label} ({count})
+            </button>
+          ))}
+        </div>
+
+        <div className="relative mb-3">
+          <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-300" />
+          <input
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Search employees"
+            className="w-full text-xs pl-7 pr-2 py-1.5 rounded-lg border border-surface-200 outline-none focus:border-brand-300"
           />
         </div>
-      )}
+
+        <div className="space-y-3 max-h-[300px] overflow-y-auto pr-1">
+          {loggedInList.length === 0 ? (
+            <p className="text-xs text-ink-300 text-center py-8">No employees found.</p>
+          ) : (
+            loggedInList.map(({ emp, rec }) => (
+              <div key={emp.id} className="flex items-center gap-3">
+                <div className="relative shrink-0">
+                  <Avatar name={`${emp.firstName} ${emp.lastName}`} color={emp.avatarColor} size="md" src={emp.profilePhotoUrl} />
+                  <span
+                    className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-white"
+                    style={{ background: rec.status === 'late' ? '#f59e0b' : '#10b981' }}
+                  />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-1.5">
+                    <p className="text-xs font-semibold text-ink-800 truncate">{emp.firstName} {emp.lastName}</p>
+                    <span className={`text-[9px] font-semibold ${rec.status === 'late' ? 'text-amber-600' : 'text-emerald-600'}`}>
+                      {rec.status === 'late' ? '● Late' : '● On time'}
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-ink-400 truncate">{emp.role} {emp.department ? `· ${emp.department}` : ''}</p>
+                  <p className="text-[10px] text-ink-300">
+                    Login - {rec.clockIn || rec.sessions?.[0]?.clockIn || '—'}
+                    {(rec.clockOut || rec.sessions?.[rec.sessions?.length - 1]?.clockOut) && (
+                      <> · Logout - {rec.clockOut || rec.sessions[rec.sessions.length - 1].clockOut}</>
+                    )}
+                  </p>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+        <button onClick={() => navigate('/app/employees')} className="w-full mt-3 text-[11px] text-brand-600 hover:underline flex items-center justify-center gap-1 pt-2 border-t border-surface-100">
+          View all employees <ArrowRight size={10} />
+        </button>
+      </div>
+
+      {/* Recent leave requests — fills the remaining space under the employee list */}
+      <div className="card p-4">
+        <div className="flex items-center justify-between mb-3">
+          <p className="text-xs font-semibold text-ink-700">Recent Leave Requests</p>
+          <button onClick={() => navigate('/app/leave')} className="text-[11px] text-brand-600 hover:underline">View all</button>
+        </div>
+        {recentLeaveRequests.length === 0 ? (
+          <div className="py-8 flex flex-col items-center text-center">
+            <CalendarDays size={20} className="text-ink-300 mb-2" />
+            <p className="text-xs text-ink-300">No leave requests yet.</p>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {recentLeaveRequests.map(r => (
+              <div key={r.id} className="flex items-center gap-3">
+                <Avatar
+                  name={r.emp ? `${r.emp.firstName} ${r.emp.lastName}` : 'Employee'}
+                  color={r.emp?.avatarColor}
+                  size="sm"
+                  src={r.emp?.profilePhotoUrl}
+                />
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-1.5">
+                    <p className="text-xs font-semibold text-ink-800 truncate">
+                      {r.emp ? `${r.emp.firstName} ${r.emp.lastName}` : 'Unknown Employee'}
+                    </p>
+                    <StatusBadge status={r.status} />
+                  </div>
+                  <p className="text-[10px] text-ink-400 truncate">
+                    {r.leaveType ?? r.type ?? 'Leave'} · {r.startDate}
+                    {r.endDate && r.endDate !== r.startDate ? ` – ${r.endDate}` : ''}
+                  </p>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+      </div>
     </div>
   );
 }

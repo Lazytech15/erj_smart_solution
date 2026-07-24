@@ -1,4 +1,4 @@
-import { Bell, HelpCircle, ChevronDown, X, CheckCheck, Clock, Menu, LogOut } from 'lucide-react';
+import { Bell, HelpCircle, ChevronDown, X, CheckCheck, Clock, Menu, LogOut, User } from 'lucide-react';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
@@ -218,7 +218,11 @@ export default function Header({ title, onMenuClick }) {
           )}
         </div>
 
-        <button className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-50 transition-colors">
+        <button
+          onClick={() => navigate('/app/help')}
+          className="w-8 h-8 flex items-center justify-center rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-50 transition-colors"
+          title="Help Center"
+        >
           <HelpCircle size={15} />
         </button>
 
@@ -228,9 +232,17 @@ export default function Header({ title, onMenuClick }) {
             onClick={() => { setShowProfile(v => !v); setShowNotifs(false); }}
             className="flex items-center gap-2 rounded-lg px-1.5 py-1 hover:bg-slate-50 transition-colors"
           >
-            <div className="w-7 h-7 rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center text-white text-[10px] font-bold shrink-0">
-              {initials}
-            </div>
+            {user?.avatarUrl ? (
+              <img
+                src={user.avatarUrl}
+                alt={user?.name || 'User'}
+                className="w-7 h-7 rounded-full object-cover shrink-0"
+              />
+            ) : (
+              <div className="w-7 h-7 rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center text-white text-[10px] font-bold shrink-0">
+                {initials}
+              </div>
+            )}
             <span className="hidden sm:block text-xs font-medium text-slate-700 max-w-[80px] truncate">{user?.name || 'User'}</span>
             <ChevronDown
               size={11}
@@ -251,10 +263,18 @@ export default function Header({ title, onMenuClick }) {
                   <p className="text-xs font-semibold text-slate-800 truncate">{user?.name || 'User'}</p>
                   <p className="text-[11px] text-slate-400 truncate mt-0.5">{user?.email || user?.role || ''}</p>
                 </div>
+                {/* Profile */}
+                <button
+                  onClick={() => { setShowProfile(false); navigate('/app/profile'); }}
+                  className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm font-medium text-slate-600 hover:bg-slate-50 transition-colors"
+                >
+                  <User size={14} />
+                  My Profile
+                </button>
                 {/* Logout */}
                 <button
-                  onClick={() => { setShowProfile(false); logout(); navigate('/login'); }}
-                  className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm font-medium text-red-500 hover:bg-red-50 transition-colors"
+                  onClick={async () => { setShowProfile(false); await logout(); navigate('/login'); }}
+                  className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm font-medium text-red-500 hover:bg-red-50 transition-colors border-t border-slate-100"
                 >
                   <LogOut size={14} />
                   Log Out
