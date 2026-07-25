@@ -78,20 +78,52 @@ export function cacheClear() {
  */
 const inFlight = new Map();
 
+// If `fn()` never settles (e.g. a stalled network connection with no timeout
+// of its own), the promise stored in `inFlight` never settles either — every
+// future call for that key would be handed that same dead promise forever,
+// with no way to recover short of a full page reload. This safety timeout
+// guarantees the in-flight slot is always released, even if fn() itself
+// never resolves or rejects.
+//
+// IMPORTANT: this must stay LONGER than the worst-case time the layers
+// underneath `fn()` can legitimately take to settle on their own — right now
+// that's the auth lock (12s, see inProcessLock in utils/supabase.js) plus
+// the per-fetch timeout (15s, FETCH_TIMEOUT_MS), which can run sequentially
+// for a single call (resolve the session, THEN issue the request) for up to
+// ~27s worst case. This was previously set to 20s — SHORTER than that
+// worst case — so this safety net was giving up and clearing its own
+// bookkeeping while the real underlying call was still legitimately
+// running (and still holding the auth lock) for several more seconds.
+// Any other call made during that gap would queue behind a lock this layer
+// had already "moved on" from, i.e. the exact "one thing times out and
+// everything after it hangs" pattern. Keep this comfortably above the sum
+// of the layers it wraps, with margin, whenever those change.
+const IN_FLIGHT_SAFETY_TIMEOUT_MS = 32_000;
+
 export async function cached(key, fn, ttlMs = DEFAULT_TTL_MS) {
   const hit = cacheGet(key);
   if (hit !== undefined) return hit;
 
   if (inFlight.has(key)) return inFlight.get(key);
 
+  let safetyTimer;
   const promise = (async () => {
     try {
-      const value = await fn();
+      const safety = new Promise((_, reject) => {
+        safetyTimer = setTimeout(
+          () => reject(new Error(`cached(): "${key}" timed out without settling`)),
+          IN_FLIGHT_SAFETY_TIMEOUT_MS
+        );
+      });
+
+      const value = await Promise.race([fn(), safety]);
+      clearTimeout(safetyTimer);
       if (value !== null && value !== undefined) {
         cacheSet(key, value, ttlMs);
       }
       return value;
     } finally {
+      clearTimeout(safetyTimer);
       inFlight.delete(key);
     }
   })();

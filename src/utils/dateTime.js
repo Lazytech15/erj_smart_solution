@@ -20,8 +20,9 @@ export const fmt = {
 
 export function minutesToHHMM(minutes) {
   if (!minutes && minutes !== 0) return '—';
-  const h = Math.floor(Math.abs(minutes) / 60);
-  const m = Math.abs(minutes) % 60;
+  const total = Math.round(Math.abs(minutes));
+  const h = Math.floor(total / 60);
+  const m = total % 60;
   const sign = minutes < 0 ? '-' : '';
   return `${sign}${h}h ${m.toString().padStart(2, '0')}m`;
 }
@@ -50,51 +51,95 @@ export function getStatus(record) {
 // in/out). A "session" is one { label, start, end } block on a shift, and one
 // { sessionId, label, clockIn, clockOut } punch on an attendance record.
 
-/** Minutes between two "HH:mm" strings. Treats a smaller end-time as crossing midnight. */
+/** Minutes between two "HH:mm" or "HH:mm:ss" strings, accurate to the
+ *  second (returns a fractional minute count, e.g. 1.5 for 90 seconds).
+ *  Treats a smaller end-time as crossing midnight. Strings without a
+ *  seconds component are treated as :00, so this still works with older
+ *  minute-only data. */
 export function hhmmDiffMinutes(clockIn, clockOut) {
   if (!clockIn || !clockOut) return 0;
-  const [ih, im] = clockIn.split(':').map(Number);
-  const [oh, om] = clockOut.split(':').map(Number);
-  let diff = (oh * 60 + om) - (ih * 60 + im);
+  const toMin = (t) => {
+    const [h, m, s = 0] = t.split(':').map(Number);
+    return h * 60 + m + s / 60;
+  };
+  let diff = toMin(clockOut) - toMin(clockIn);
   if (diff < 0) diff += 24 * 60;
   return diff;
 }
 
-/** Total unpaid break minutes configured on a shift (e.g. a 15-min morning
- *  break, an hour for lunch, a 15-min afternoon break) — the full scheduled
- *  amount, regardless of whether a given record actually clocked through
- *  all of them. Used for the shift's expected/scheduled duration. Breaks
- *  marked `paid: true` don't count here — they're not deducted from
- *  scheduled time. Breaks without a `paid` field are treated as unpaid,
- *  so existing shifts keep behaving exactly as before. */
-export function getShiftBreakMinutes(shift) {
-  if (!shift?.breaks?.length) return 0;
-  return shift.breaks.reduce((acc, b) => b.paid ? acc : acc + hhmmDiffMinutes(b.start, b.end), 0);
+
+/** A break's allotted length in minutes — the modern shape stores this
+ *  directly (`durationMinutes`, set in Shift Management, since breaks are
+ *  now employee-triggered from the extension rather than tied to a fixed
+ *  time-of-day window). Falls back to diffing legacy `start`/`end` fields
+ *  for shifts saved before this change. */
+function breakAllottedMinutes(brk) {
+  if (brk?.durationMinutes != null) return Number(brk.durationMinutes) || 0;
+  if (brk?.start && brk?.end) return hhmmDiffMinutes(brk.start, brk.end);
+  return 0;
 }
 
-/** Minutes of a shift's configured breaks that actually overlap the
- *  employee's clocked time for a record — i.e. only deduct a break (or the
- *  portion of it) the employee was actually clocked through. An employee
- *  who clocked out early, mid-break, only loses the overlapping minutes.
- *  Breaks marked `paid: true` are skipped entirely — paid time isn't
- *  deducted from worked hours. */
+/** Total unpaid break minutes configured on a shift (e.g. a 15-min morning
+ *  break, an hour for lunch, a 15-min afternoon break) — the full allotted
+ *  amount, regardless of whether a given record actually took all of them.
+ *  Used for the shift's expected/scheduled duration. Breaks marked
+ *  `paid: true` don't count here — they're not deducted from scheduled
+ *  time. Breaks without a `paid` field are treated as unpaid, so existing
+ *  shifts keep behaving exactly as before. */
+export function getShiftBreakMinutes(shift) {
+  if (!shift?.breaks?.length) return 0;
+  return shift.breaks.reduce((acc, b) => b.paid ? acc : acc + breakAllottedMinutes(b), 0);
+}
+
+/** Net worked-hours effect of the breaks actually taken in a record, using
+ *  the extension's real segment timeline (`record.segments`, each one
+ *  `{ type: 'work'|'break', breakId, start, end }`). This is the source of
+ *  truth when present — no guessing based on a fixed schedule window, since
+ *  breaks are started by the employee whenever they like.
+ *
+ *  Base worked minutes (computed from clock punches elsewhere) already
+ *  excludes every break's real gap in full, overrun included, because the
+ *  extension writes one punch session per work stretch (see
+ *  extension/api.js#syncSegments) with a gap for every break in between.
+ *  So all this needs to do is credit *back* the on-time portion of any
+ *  break marked Paid — capped at its shift-assigned allotment, so time
+ *  taken beyond that allotment is never credited, whether the break is
+ *  paid or unpaid. Returns a number to ADD to the base worked minutes
+ *  (i.e. paid-break credit), not a deduction. */
+export function computeSegmentBreakCredit(record, shift) {
+  if (!record?.segments?.length || !shift?.breaks?.length) return 0;
+  const breakDefs = new Map(shift.breaks.map(b => [b.id, b]));
+  return record.segments
+    .filter(s => s.type === 'break' && s.start && s.end)
+    .reduce((acc, s) => {
+      const def = breakDefs.get(s.breakId);
+      if (!def?.paid) return acc; // unpaid: already excluded above, nothing to add back
+      const allotted = breakAllottedMinutes(def);
+      const actual = hhmmDiffMinutes(s.start, s.end);
+      return acc + Math.max(0, Math.min(actual, allotted));
+    }, 0);
+}
+
+/** Legacy path: minutes of a shift's configured breaks that overlap the
+ *  employee's clocked time for a record, used only for records that don't
+ *  carry a real segment timeline (e.g. manually entered via the Attendance
+ *  page's Add/Edit Record form, which just has a single clock-in/out pair
+ *  and no way to know exactly when a break happened). Approximates by
+ *  assuming the full allotted length of every unpaid break was taken
+ *  within the punched window. Breaks marked `paid: true` are skipped —
+ *  paid time isn't deducted from worked hours. */
 export function computeBreakDeductionMinutes(record, shift) {
   if (!shift?.breaks?.length) return 0;
   const punches = getSessionPunches(record).filter(p => p.clockIn && p.clockOut);
   if (!punches.length) return 0;
-  const toMin = t => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
+  const toMin = t => { const [h, m, s = 0] = t.split(':').map(Number); return h * 60 + m + s / 60; };
+  const totalPunchedMinutes = punches.reduce((acc, p) => acc + Math.max(0, toMin(p.clockOut) - toMin(p.clockIn)), 0);
   let total = 0;
   for (const brk of shift.breaks) {
     if (brk.paid) continue; // paid breaks aren't deducted from worked time
-    if (!brk.start || !brk.end) continue;
-    const bs = toMin(brk.start), be = toMin(brk.end);
-    if (be <= bs) continue; // skip invalid/overnight breaks
-    for (const p of punches) {
-      const ps = toMin(p.clockIn), pe = toMin(p.clockOut);
-      total += Math.max(0, Math.min(be, pe) - Math.max(bs, ps));
-    }
+    total += breakAllottedMinutes(brk);
   }
-  return total;
+  return Math.min(total, totalPunchedMinutes);
 }
 
 /** Minutes between two "HH:mm" strings, treating a smaller end as invalid (0)
@@ -102,8 +147,8 @@ export function computeBreakDeductionMinutes(record, shift) {
  *  midnight isn't a realistic case. */
 function hhmmToMinutes(t) {
   if (!t) return null;
-  const [h, m] = t.split(':').map(Number);
-  return h * 60 + m;
+  const [h, m, s = 0] = t.split(':').map(Number);
+  return h * 60 + m + s / 60;
 }
 
 /** If a punch's clock-in is *after* its scheduled start but still within the
@@ -145,7 +190,17 @@ export function computeWorkedMinutes(record, shift, lateThresholdMin = 0) {
     const ci = effectiveClockIn(record?.clockIn, shift?.start, lateThresholdMin);
     minutes = hhmmDiffMinutes(ci, record?.clockOut);
   }
-  if (shift) minutes -= computeBreakDeductionMinutes(record, shift);
+  if (shift) {
+    if (record?.segments?.length) {
+      // Extension-synced record: every break gap (including any overrun
+      // past its allotted minutes) is already excluded from `minutes`
+      // above because each work stretch is its own punch session. Only
+      // paid breaks need crediting back, capped at their allotment.
+      minutes += computeSegmentBreakCredit(record, shift);
+    } else {
+      minutes -= computeBreakDeductionMinutes(record, shift);
+    }
+  }
   return Math.max(0, minutes);
 }
 

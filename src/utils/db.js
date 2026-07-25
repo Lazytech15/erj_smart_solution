@@ -1,4 +1,4 @@
-import { supabase } from './supabase';
+import { supabase, fetchWithTimeout } from './supabase';
 import { createClient } from '@supabase/supabase-js';
 import { encryptField, decryptField, encryptFields, decryptFields } from './crypto';
 import { cached, cacheInvalidate } from './cache';
@@ -14,6 +14,11 @@ const supabaseNoSession = createClient(
       autoRefreshToken: false,
       detectSessionInUrl: false,
       storageKey: 'erj_nosession_client',
+    },
+    // See supabase.js: without this, a stalled connection after the tab has
+    // been backgrounded hangs this client's requests forever too.
+    global: {
+      fetch: fetchWithTimeout,
     },
   }
 );

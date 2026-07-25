@@ -8,6 +8,50 @@ import { StatusBadge, Avatar, SearchInput, SelectField, SectionHeader, EmptyStat
 import { useToast } from '../context/ToastContext';
 import { useAuth } from '../context/AuthContext';
 
+// Extension-synced records carry a real `segments` timeline (see
+// extension/api.js#syncSegments) in addition to the work-only `sessions`
+// used for hours math. This surfaces the break segments from it — with
+// each one's admin-given label, paid status, and whether it ran over its
+// allotted time — purely for display, so the Time Log column shows WHY a
+// Paid break's minutes are folded into the Hours total instead of that
+// total looking unexplained next to just the work punches.
+function getBreakPunches(record) {
+  if (!record?.segments?.length) return [];
+  const breakDefs = new Map((record.shift?.breaks || []).map(b => [b.id, b]));
+  return record.segments
+    .filter(s => s.type === 'break')
+    .map(s => {
+      const def = breakDefs.get(s.breakId);
+      return {
+        label: s.label || def?.label || 'Break',
+        start: s.start,
+        end: s.end,
+        paid: !!def?.paid,
+        over: !!s.over,
+      };
+    });
+}
+
+// Work punches and break punches used to render as two separate stacked
+// lists (all work rows, then all break rows underneath) regardless of
+// when they actually happened — so a break taken between two work
+// stretches showed up visually "after" both of them instead of between,
+// making the Time Log column read as two disconnected lists rather than
+// one story of the day. This merges both into a single list ordered by
+// start time, tagged with `type` so the row can carry a small colored
+// marker (work vs. paid break vs. unpaid break vs. over-break) instead of
+// relying on text color alone to say what kind of row it is.
+function getTimeLogRows(record) {
+  const work = getSessionPunches(record).map(p => ({ type: 'work', label: p.label, start: p.clockIn, end: p.clockOut }));
+  const breaks = getBreakPunches(record).map(b => ({ type: 'break', ...b }));
+  const toMin = (t) => {
+    if (!t) return Infinity; // no start time yet (shouldn't happen) sorts last
+    const [h, m] = t.split(':').map(Number);
+    return h * 60 + m;
+  };
+  return [...work, ...breaks].sort((a, b) => toMin(a.start) - toMin(b.start));
+}
+
 function exportToCSV(records, date, lateThreshold) {
   const headers = ['Employee Code', 'First Name', 'Last Name', 'Department', 'Shift', 'Clock In', 'Clock Out', 'Hours Worked', 'Session Detail', 'Status', 'Notes'];
   const rows = records.map(r => {
@@ -60,23 +104,79 @@ function calcStatus(clockInTime, shiftStart, lateThresholdMin = 15) {
  *  sessions the employee's shift is configured with (1 pair for a standard
  *  shift, or several for a split shift). Existing saved punches are reused
  *  when editing; a legacy clockIn/clockOut-only record is seeded into the
- *  first/last session as a best-effort migration. */
+ *  first/last session as a best-effort migration.
+ *
+ *  Punches are grouped by their real `sessionId`, not by array position —
+ *  a break taken mid-session produces a second work-stretch that shares
+ *  its session's real id (see extension/api.js#syncSegments), not a made-
+ *  up "next" session. Grouping by id means that second stretch shows up
+ *  as an extra "Morning (2)" row under Morning, instead of being
+ *  mislabeled as "Afternoon" or "Session 4" just because it happened to
+ *  be the record's 2nd/4th saved punch. Any punch whose sessionId doesn't
+ *  match a session the shift has configured (e.g. the shift was since
+ *  reconfigured) still gets its own row rather than being dropped. */
 function deriveFormSessions(shift, record) {
   const shiftSessions = getShiftSessions(shift);
   const isLegacyRecord = !record?.sessions; // no per-session breakdown saved at all
-  return shiftSessions.map((ss, i) => ({
-    sessionId: ss.id,
-    label: ss.label,
-    clockIn:  isLegacyRecord ? (i === 0 ? (record?.clockIn || '') : '') : (record.sessions[i]?.clockIn || ''),
-    clockOut: isLegacyRecord ? (i === shiftSessions.length - 1 ? (record?.clockOut || '') : '') : (record.sessions[i]?.clockOut || ''),
-  }));
+  if (isLegacyRecord) {
+    return shiftSessions.map((ss, i) => ({
+      sessionId: ss.id,
+      label: ss.label,
+      clockIn:  i === 0 ? (record?.clockIn || '') : '',
+      clockOut: i === shiftSessions.length - 1 ? (record?.clockOut || '') : '',
+    }));
+  }
+
+  const rows = [];
+  const knownIds = new Set(shiftSessions.map(ss => ss.id));
+  // Punches saved before this fix (or by an older extension version) may
+  // carry a sessionId that doesn't match any of the shift's current
+  // sessions — most commonly every punch tagged with just the first
+  // session's id, from before per-stretch session tagging existed. Rather
+  // than dumping all of those into a catch-all "Other" bucket, fall back
+  // to placing them by time-of-day, same as the extension itself now
+  // does — so existing records regroup correctly here too, without
+  // needing the employee to punch again for it to show right.
+  const toMin = (t) => { const [h, m] = (t || '0:0').split(':').map(Number); return h * 60 + m; };
+  const resolveSession = (punch) => {
+    if (knownIds.has(punch.sessionId)) return punch.sessionId;
+    if (shiftSessions.length <= 1) return shiftSessions[0]?.id;
+    const mins = toMin(punch.clockIn);
+    const match = shiftSessions.find(ss => mins >= toMin(ss.start) && mins < toMin(ss.end));
+    return match?.id;
+  };
+
+  shiftSessions.forEach(ss => {
+    const punches = record.sessions.filter(s => resolveSession(s) === ss.id);
+    if (!punches.length) {
+      rows.push({ sessionId: ss.id, label: ss.label, clockIn: '', clockOut: '' });
+      return;
+    }
+    punches.forEach((p, i) => {
+      rows.push({ sessionId: ss.id, label: punches.length > 1 ? `${ss.label || 'Session'} (${i + 1})` : ss.label, clockIn: p.clockIn || '', clockOut: p.clockOut || '' });
+    });
+  });
+  // A punch that still can't be resolved to any real session (shift had
+  // no sessions configured at all when it was saved) keeps its own row
+  // rather than silently disappearing from the form.
+  record.sessions.filter(s => !resolveSession(s)).forEach(s => {
+    rows.push({ sessionId: s.sessionId, label: s.label || 'Other', clockIn: s.clockIn || '', clockOut: s.clockOut || '' });
+  });
+  return rows;
 }
 
 /** Collapse the form's punch list back into a saved record: keeps a full
  *  `sessions` breakdown plus legacy top-level clockIn/clockOut (first
  *  session's in, last session's out) so older parts of the app that only
- *  know about a single pair keep working unchanged. */
-function finalizeRecord(form) {
+ *  know about a single pair keep working unchanged.
+ *
+ *  Pass the record being edited (omit when adding a brand-new one) so its
+ *  `segments` — the extension's break timeline that drives the Time Log's
+ *  break rows and paid-break credit — carries over untouched. The form
+ *  has no field for break segments at all, so without this, saving any
+ *  edit to an extension-synced record would silently wipe every break on
+ *  it, even ones the form never touched. */
+function finalizeRecord(form, existingRecord) {
   const sessions = (form.sessions || [])
     .filter(s => s.clockIn || s.clockOut)
     .map(({ sessionId, label, clockIn, clockOut }) => ({ sessionId, label, clockIn, clockOut }));
@@ -87,6 +187,7 @@ function finalizeRecord(form) {
     sessions,
     clockIn:  sessions[0]?.clockIn || '',
     clockOut: sessions[sessions.length - 1]?.clockOut || '',
+    ...(existingRecord?.segments ? { segments: existingRecord.segments } : {}),
   };
 }
 
@@ -157,7 +258,7 @@ export default function AttendancePage() {
   }
 
   function handleEditRecord(form) {
-    updateAttendanceRecord(editRecord.id, finalizeRecord(form));
+    updateAttendanceRecord(editRecord.id, finalizeRecord(form, editRecord));
     toast('Record updated', 'success');
     setEditRecord(null);
   }
@@ -260,11 +361,36 @@ export default function AttendancePage() {
                     {getSessionPunches(rec).length === 0 ? (
                       <span className="text-xs text-ink-300">—</span>
                     ) : (
-                      <div className="flex flex-col gap-0.5">
-                        {getSessionPunches(rec).map((p, i) => (
-                          <div key={i} className="text-[11px] text-ink-600 whitespace-nowrap">
-                            {p.label && <span className="text-ink-400 font-medium">{p.label}: </span>}
-                            {p.clockIn || '—'} – {p.clockOut || '—'}
+                      <div className="flex flex-col gap-1">
+                        {getTimeLogRows(rec).map((row, i) => (
+                          <div key={i} className="flex items-center gap-1.5 text-[11px] whitespace-nowrap">
+                            <span
+                              className="w-1.5 h-1.5 rounded-full shrink-0"
+                              style={{
+                                background: row.type === 'work'
+                                  ? 'var(--ink-400, #9ca3af)'
+                                  : row.over
+                                    ? 'var(--danger-500, #ef4444)'
+                                    : row.paid
+                                      ? 'var(--brand-500, #6366f1)'
+                                      : 'var(--ink-300, #d1d5db)',
+                              }}
+                            />
+                            {row.type === 'work' ? (
+                              <span className="text-ink-600">
+                                {row.label && <span className="text-ink-400 font-medium">{row.label}: </span>}
+                                {row.start || '—'} – {row.end || '—'}
+                              </span>
+                            ) : (
+                              <span>
+                                <span className={row.paid ? 'text-brand-500 font-medium' : 'text-ink-400 font-medium'}>
+                                  {row.label}{row.paid ? ' (paid)' : ''}:{' '}
+                                </span>
+                                <span className={row.over ? 'text-danger-500' : 'text-ink-500'}>
+                                  {row.start || '—'} – {row.end || '—'}{row.over ? ' (over)' : ''}
+                                </span>
+                              </span>
+                            )}
                           </div>
                         ))}
                       </div>

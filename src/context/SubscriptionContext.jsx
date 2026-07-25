@@ -99,43 +99,143 @@ export function SubscriptionProvider({ children }) {
   const [pendingEmployees, setPendingEmployees] = useState([]);
 
   // ── Reload from Supabase whenever the logged-in user changes ──────────────
-  useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      setLoading(true);
-      setSubscription(null);      // clears both state and ref
-      setPendingEmployees([]);
-      if (user?.subscriptionId) {
+  const loadSubscription = useCallback(async (subscriptionId, { cancelledRef } = {}) => {
+    setLoading(true);
+    try {
+      if (subscriptionId) {
         const [data, pending] = await Promise.all([
-          getSubscription(user.subscriptionId),
-          getPendingRegistrations(user.subscriptionId),
+          getSubscription(subscriptionId),
+          getPendingRegistrations(subscriptionId),
         ]);
-        if (!cancelled) {
+        if (!cancelledRef?.current) {
           setSubscription(data ?? null);
           setPendingEmployees(pending);
         }
+        return !!data;
       }
-      if (!cancelled) setLoading(false);
+      return false;
+    } catch (err) {
+      // A failed/timed-out fetch (see cache.js — the underlying Supabase call
+      // can genuinely hang past its own fetch-level timeout, e.g. stuck
+      // behind an internal token-refresh after the JWT went stale during a
+      // long idle period) used to leave `subscription` stuck at null with
+      // nothing ever retrying it — the only way out was a manual page
+      // refresh, since that's the only other thing that re-runs this load.
+      // The retry effect below now keeps trying in the background instead.
+      console.warn('[SubscriptionContext] load failed:', err?.message || err);
+      if (!cancelledRef?.current) {
+        setSubscription(null);
+        setPendingEmployees([]);
+      }
+      return false;
+    } finally {
+      if (!cancelledRef?.current) setLoading(false);
     }
-    load();
-    return () => { cancelled = true; };
+  }, []); // eslint-disable-line
+
+  useEffect(() => {
+    const cancelledRef = { current: false };
+    setSubscription(null);      // clears both state and ref
+    setPendingEmployees([]);
+    loadSubscription(user?.subscriptionId, { cancelledRef });
+    return () => { cancelledRef.current = true; };
   }, [user?.subscriptionId]); // eslint-disable-line
 
+  // ── Self-heal a failed load instead of requiring a manual refresh ──────────
+  // If the load above failed (subscription is null but we do have a logged-in
+  // user with a subscriptionId), keep retrying: once promptly on the next
+  // tab-focus (the most likely moment the underlying network/session is
+  // actually usable again), and on a slow background interval as a backstop
+  // for the case where the tab is never explicitly refocused.
+  useEffect(() => {
+    if (subscription || loading || !user?.subscriptionId) return;
+
+    const cancelledRef = { current: false };
+    const retry = () => {
+      if (document.visibilityState !== 'visible') return;
+      loadSubscription(user.subscriptionId, { cancelledRef });
+    };
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') retry();
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    const RETRY_INTERVAL_MS = 20_000;
+    const interval = setInterval(retry, RETRY_INTERVAL_MS);
+
+    return () => {
+      cancelledRef.current = true;
+      document.removeEventListener('visibilitychange', handleVisibility);
+      clearInterval(interval);
+    };
+  }, [subscription, loading, user?.subscriptionId, loadSubscription]);
+
   // ── Poll attendance_records every 15 s so mobile clock-ins appear live ───────
+  // Skips ticks while the tab is hidden, and backs off after repeated
+  // failures, instead of firing a fresh request every 15s no matter what.
+  //
+  // Why: each poll opens a connection to the Supabase host. Browsers cap
+  // concurrent connections per host (6 for HTTP/1.1); if a request's
+  // AbortController fires but the underlying socket doesn't actually free up
+  // right away (this can happen when a connection went bad during a tab
+  // being idle/backgrounded — the JS-level abort doesn't guarantee the OS
+  // socket closes immediately), repeatedly opening new polling requests into
+  // that situation can exhaust all 6 connections with zombied sockets. Once
+  // that happens, EVERY fetch to that host — including Save/Logout — just
+  // queues forever waiting for a socket, with no visible network activity
+  // and no error, and only a full page reload (which resets the connection
+  // pool) recovers. Not polling while hidden, and slowing down (rather than
+  // hammering) after consecutive failures, keeps this from spiraling.
   useEffect(() => {
     if (!user?.subscriptionId) return;
-    const interval = setInterval(async () => {
-      const records = await getAttendanceRecords(user.subscriptionId);
-      if (records === null) return; // fetch failed — keep existing
+
+    let consecutiveFailures = 0;
+    let cancelled = false;
+
+    async function tick() {
+      if (document.visibilityState !== 'visible') return; // don't poll while backgrounded
+      let records;
+      try {
+        records = await getAttendanceRecords(user.subscriptionId);
+      } catch (err) {
+        // getAttendanceRecords rejects (doesn't resolve to null) when the
+        // underlying cached() call times out (see cache.js). Skip this
+        // tick and keep existing data, same as the records === null case
+        // below — but also count it so the interval below can slow down
+        // instead of retrying at full speed into a bad connection.
+        consecutiveFailures++;
+        console.warn('[SubscriptionContext] attendance poll failed:', err?.message || err);
+        return;
+      }
+      consecutiveFailures = 0;
+      if (records === null || cancelled) return; // fetch failed — keep existing
       setSubscription(prev => {
         if (!prev) return prev;
         // Skip re-render if records haven't changed
         if (JSON.stringify(prev.attendanceRecords) === JSON.stringify(records)) return prev;
         return { ...prev, attendanceRecords: records };
       });
-    }, 15000); // every 15 seconds
-    return () => clearInterval(interval);
+    }
+
+    const BASE_INTERVAL_MS = 15000;
+    const MAX_INTERVAL_MS = 120000; // back off to at most once every 2 min
+    let timeoutId = setTimeout(runAndReschedule, BASE_INTERVAL_MS);
+
+    async function runAndReschedule() {
+      await tick();
+      if (cancelled) return;
+      // Exponential-ish backoff while failures persist, reset once healthy.
+      const delay = Math.min(BASE_INTERVAL_MS * 2 ** consecutiveFailures, MAX_INTERVAL_MS);
+      timeoutId = setTimeout(runAndReschedule, delay);
+    }
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timeoutId);
+    };
   }, [user?.subscriptionId]); // eslint-disable-line
+
 
   // ── Core mutator: reads ref (always fresh), writes state + Supabase ──────────
   // Returns a Promise now (previously returned the plain object). No existing
@@ -147,8 +247,17 @@ export function SubscriptionProvider({ children }) {
   const update = useCallback(async (updater) => {
     const current = subRef.current;
     if (!current) {
-      console.warn('[SubscriptionContext] update called but subscription is null');
-      return null;
+      // Previously returned null here — a silent no-op. Every caller in this
+      // file (addShift, updateShift, addDepartment, etc.) is a fire-and-forget
+      // useCallback, and none of their callers checked the return value, so a
+      // null subscription (e.g. after a stalled/failed background reload —
+      // see the SubscriptionContext poll/reload effects above) meant the
+      // "save" quietly did nothing: no Supabase call, no error, but the
+      // calling page still showed a success toast right after. Throwing here
+      // instead turns that into a real rejection callers can catch.
+      const err = new Error('subscription-not-loaded');
+      console.warn('[SubscriptionContext] update() called but subscription is null — nothing was saved');
+      throw err;
     }
     const next = updater(current);    // may throw synchronously (e.g. seat limit) — propagates to caller
     setSubscription(next);            // updates both ref and React state

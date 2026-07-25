@@ -42,6 +42,10 @@ export function startSessionPolicy(rememberMe) {
     rememberMe: !!rememberMe,
     loginAt: now,
     expiresAt: rememberMe ? now + REMEMBER_ME_DURATION_MS : nextMidnight(now),
+    // Timestamp-based idle tracking (see touchActivity/isInactivityExpired
+    // below) instead of a single long-lived setTimeout — see comment there
+    // for why.
+    lastActivityAt: now,
   };
   localStorage.setItem(STORAGE_KEY, JSON.stringify(policy));
   return policy;
@@ -61,6 +65,42 @@ export function getSessionPolicy() {
 
 export function clearSessionPolicy() {
   localStorage.removeItem(STORAGE_KEY);
+}
+
+/**
+ * Record fresh user activity. Persisted (not just kept in a JS closure/ref)
+ * so the "last seen active" moment survives a page reload and is readable
+ * from anywhere, and so idle time can be measured against a real wall-clock
+ * timestamp instead of relying on a single setTimeout staying alive.
+ *
+ * Browsers throttle (or fully freeze) timers in backgrounded/idle tabs, so a
+ * lone `setTimeout(..., 30 * 60 * 1000)` is not reliable: it can fire very
+ * late, or effectively never until the tab happens to regain focus. Storing
+ * `lastActivityAt` and re-checking `Date.now() - lastActivityAt` on every
+ * tick of the existing 30s policy-poll interval (which already has to be
+ * timestamp-based for the midnight check to self-heal) makes idle detection
+ * just as self-healing: whenever that interval actually gets to run, it
+ * immediately knows the true elapsed idle time, however late it runs.
+ */
+export function touchActivity() {
+  const policy = getSessionPolicy();
+  if (!policy) return;
+  policy.lastActivityAt = Date.now();
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(policy));
+  } catch { /* localStorage unavailable — non-fatal */ }
+}
+
+/**
+ * True if the current policy is NOT "remember me" and more than
+ * INACTIVITY_TIMEOUT_MS has elapsed since the last recorded activity.
+ * "Remember me" sessions are never subject to the idle timeout.
+ */
+export function isInactivityExpired() {
+  const policy = getSessionPolicy();
+  if (!policy || policy.rememberMe) return false;
+  const last = typeof policy.lastActivityAt === 'number' ? policy.lastActivityAt : policy.loginAt;
+  return Date.now() - last >= INACTIVITY_TIMEOUT_MS;
 }
 
 /**

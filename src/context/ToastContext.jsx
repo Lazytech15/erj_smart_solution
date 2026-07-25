@@ -3,6 +3,10 @@ import { CheckCircle, XCircle, AlertTriangle, Info, X } from 'lucide-react';
 
 const ToastContext = createContext(null);
 
+// Module-level counter (not state) — just needs to be unique per call, not
+// reactive or persisted.
+let toastSeq = 0;
+
 const ICONS = {
   success: <CheckCircle size={16} className="text-success-500 shrink-0" />,
   error:   <XCircle    size={16} className="text-danger-500  shrink-0" />,
@@ -14,7 +18,13 @@ export function ToastProvider({ children }) {
   const [toasts, setToasts] = useState([]);
 
   const toast = useCallback((message, type = 'info', duration = 3500) => {
-    const id = Date.now();
+    // Date.now() alone isn't unique enough — two toasts fired within the
+    // same millisecond (e.g. login's "signed in" toast immediately followed
+    // by another state update) get the same id, which React then warns
+    // about as a duplicate key and can cause one toast to be dropped/
+    // duplicated in the list. A monotonically increasing counter appended
+    // to the timestamp guarantees uniqueness regardless of timing.
+    const id = `${Date.now()}-${++toastSeq}`;
     setToasts(t => [...t, { id, message, type }]);
     setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), duration);
   }, []);

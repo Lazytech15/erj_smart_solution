@@ -13,16 +13,20 @@ const EMPTY_FORM = {
   clockInMode: 'remote', qrValidity: 'daily',
   clockType: 'standard', // 'standard' = 1 clock in/out · 'split' = multiple sessions per day
   sessions: [],
-  breaks: [], // breaks within the shift, e.g. { label: 'Lunch', start: '12:00', end: '13:00', paid: false } — unpaid ones are auto-deducted from worked hours
+  breaks: [], // breaks within the shift, e.g. { label: 'Lunch', durationMinutes: 60, paid: false } —
+              // the employee starts these themselves from the extension whenever suits them; the
+              // duration here is only the allotted length, not a fixed time-of-day window. Unpaid
+              // breaks are deducted from worked hours; going over the allotted length is deducted
+              // too, whether the break is paid or unpaid.
   departments: [], // department names this shift auto-assigns to
 };
 
 // Quick-fill template for the most common break setup: a short morning
 // break, an hour for lunch, and a short afternoon break. Unpaid by default.
 const BREAK_TEMPLATE = [
-  { label: 'Morning Break',   start: '10:00', end: '10:15', paid: false },
-  { label: 'Lunch',           start: '12:00', end: '13:00', paid: false },
-  { label: 'Afternoon Break', start: '15:00', end: '15:15', paid: false },
+  { label: 'Morning Break',   durationMinutes: 15, paid: false },
+  { label: 'Lunch',           durationMinutes: 60, paid: false },
+  { label: 'Afternoon Break', durationMinutes: 15, paid: false },
 ];
 
 // Quick-fill templates for the most common split-shift setups, matching
@@ -46,8 +50,8 @@ const SESSION_TEMPLATES = {
  *  reads shift.start/shift.end keeps working without any changes. */
 function buildShiftPayload(form) {
   const breaks = (form.breaks || [])
-    .filter(b => b.start && b.end)
-    .map((b, i) => ({ id: b.id ?? `b${i + 1}`, label: b.label?.trim() || `Break ${i + 1}`, start: b.start, end: b.end, paid: !!b.paid }));
+    .filter(b => Number(b.durationMinutes) > 0)
+    .map((b, i) => ({ id: b.id ?? `b${i + 1}`, label: b.label?.trim() || `Break ${i + 1}`, durationMinutes: Number(b.durationMinutes), paid: !!b.paid }));
 
   if ((form.clockType || 'standard') === 'split' && form.sessions?.length) {
     const sessions = form.sessions.map((s, i) => ({
@@ -264,7 +268,7 @@ function ShiftFormFields({ form, setForm, departments = [], employees = [], allS
   function addBreak() {
     setForm(p => {
       const list = p.breaks || [];
-      return { ...p, breaks: [...list, { label: `Break ${list.length + 1}`, start: '15:00', end: '15:15', paid: false }] };
+      return { ...p, breaks: [...list, { label: `Break ${list.length + 1}`, durationMinutes: 15, paid: false }] };
     });
   }
 
@@ -277,12 +281,8 @@ function ShiftFormFields({ form, setForm, departments = [], employees = [], allS
   }
 
   const totalBreakMinutes = breaks.reduce((acc, b) => {
-    if (!b.start || !b.end || b.paid) return acc;
-    const [sh, sm] = b.start.split(':').map(Number);
-    const [eh, em] = b.end.split(':').map(Number);
-    let diff = (eh * 60 + em) - (sh * 60 + sm);
-    if (diff < 0) diff += 24 * 60;
-    return acc + diff;
+    if (b.paid) return acc;
+    return acc + (Number(b.durationMinutes) || 0);
   }, 0);
 
   function toggleDept(dept) {
@@ -431,10 +431,14 @@ function ShiftFormFields({ form, setForm, departments = [], employees = [], allS
         </div>
       )}
 
-      {/* Breaks — unpaid windows (lunch, coffee breaks, etc.) inside the shift.
-           Works for both standard and split shifts; any break whose window
-           falls fully within a punched clock-in/out is auto-deducted from
-           worked hours on the Attendance page. */}
+      {/* Breaks — employee-triggered, timer-based breaks inside the shift
+           (taken from the Shift Clock extension). Each one gets a label
+           (shown as its own button in the extension, e.g. "Morning Break")
+           and an allotted length in minutes rather than a fixed time-of-day
+           window, since the employee starts it whenever suits them. Going
+           over the allotted length is deducted from worked hours whether
+           the break is paid or unpaid — being Paid only means the on-time
+           portion still counts as worked time. */}
       <div>
         <div className="flex items-center justify-between mb-2">
           <p className="text-xs font-medium text-ink-600">
@@ -460,13 +464,20 @@ function ShiftFormFields({ form, setForm, departments = [], employees = [], allS
                 placeholder={`Break ${idx + 1}`}
                 className="input !py-1.5 !text-xs flex-1 min-w-0"
               />
-              <input type="time" value={b.start} onChange={e => updateBreak(idx, 'start', e.target.value)} className="input !py-1.5 !text-xs w-[104px] shrink-0" />
-              <span className="text-ink-300 text-xs shrink-0">–</span>
-              <input type="time" value={b.end} onChange={e => updateBreak(idx, 'end', e.target.value)} className="input !py-1.5 !text-xs w-[104px] shrink-0" />
+              <div className="flex items-center gap-1 shrink-0">
+                <input
+                  type="number" min="1" step="1"
+                  value={b.durationMinutes ?? ''}
+                  onChange={e => updateBreak(idx, 'durationMinutes', e.target.value.replace(/[^\d]/g, ''))}
+                  placeholder="15"
+                  className="input !py-1.5 !text-xs w-[64px] text-center"
+                />
+                <span className="text-ink-300 text-[11px]">min</span>
+              </div>
               <button
                 type="button"
                 onClick={() => updateBreak(idx, 'paid', !b.paid)}
-                title={b.paid ? 'Paid — not deducted from worked hours' : 'Unpaid — deducted from worked hours'}
+                title={b.paid ? 'Paid — on-time portion still counts as worked time' : 'Unpaid — deducted from worked hours'}
                 className={`shrink-0 px-2 py-1 rounded-md text-[10px] font-medium border transition-colors ${
                   b.paid
                     ? 'bg-brand-50 text-brand-600 border-brand-200'
@@ -487,7 +498,7 @@ function ShiftFormFields({ form, setForm, departments = [], employees = [], allS
         </button>
 
         <p className="text-[10px] text-ink-400 mt-2 leading-relaxed">
-          Employees don't clock in/out for these — e.g. a 10:00–10:15 break, 12:00–13:00 lunch, and 15:00–15:15 break. Mark a break <span className="font-medium text-ink-500">Unpaid</span> to have it subtracted from worked hours automatically (only the portion actually covered by a clock-in/out is deducted); mark it <span className="font-medium text-ink-500">Paid</span> to keep it counted as worked time.
+          Each break shows up as its own button in the Shift Clock extension, labeled with the name you give it here (e.g. "Morning Break"). The employee taps it whenever they take that break, and the extension counts down the minutes you set. Mark a break <span className="font-medium text-ink-500">Unpaid</span> to have the time it's taken subtracted from worked hours automatically; mark it <span className="font-medium text-ink-500">Paid</span> to keep the on-time portion counted as worked time. Either way, any time taken beyond the allotted minutes is always deducted.
         </p>
       </div>
 
@@ -599,12 +610,17 @@ function ShiftsContent() {
     setEditTarget(shift);
   }
 
-  function handleAdd() {
+  async function handleAdd() {
     if (!form.name.trim()) return;
     const payload = buildShiftPayload(form);
     // addShift sets id = Date.now() internally; capture the same timestamp
     const newShiftId = Date.now();
-    addShift({ ...payload, id: newShiftId, color: SHIFT_COLORS[shifts.length % SHIFT_COLORS.length] });
+    try {
+      await addShift({ ...payload, id: newShiftId, color: SHIFT_COLORS[shifts.length % SHIFT_COLORS.length] });
+    } catch (err) {
+      toast('Could not save the new shift — please refresh the page and try again.', 'error');
+      return; // keep the modal open with the form intact so nothing is lost
+    }
     // Bulk-reassign employees in the selected departments to this new shift.
     // Use a tiny delay so the shift is committed to state before employee updates run.
     if (form.departments?.length) {
@@ -620,20 +636,25 @@ function ShiftsContent() {
     setAddModal(false);
   }
 
-  function handleEdit() {
+  async function handleEdit() {
     if (!form.name.trim()) return;
     const payload = buildShiftPayload(form);
-    updateShift(editTarget.id, {
-      name: form.name,
-      start: payload.start,
-      end: payload.end,
-      clockInMode: form.clockInMode,
-      qrValidity: form.qrValidity,
-      clockType: payload.clockType,
-      sessions: payload.sessions,
-      breaks: payload.breaks,
-      departments: form.departments || [],
-    });
+    try {
+      await updateShift(editTarget.id, {
+        name: form.name,
+        start: payload.start,
+        end: payload.end,
+        clockInMode: form.clockInMode,
+        qrValidity: form.qrValidity,
+        clockType: payload.clockType,
+        sessions: payload.sessions,
+        breaks: payload.breaks,
+        departments: form.departments || [],
+      });
+    } catch (err) {
+      toast('Could not save your changes — please refresh the page and try again.', 'error');
+      return; // leave the modal open, form untouched, nothing falsely marked "saved"
+    }
     // Bulk-reassign employees in the selected departments to this shift
     if (form.departments?.length) {
       employees
@@ -644,13 +665,18 @@ function ShiftsContent() {
     setEditTarget(null);
   }
 
-  function handleRemove(shift) {
+  async function handleRemove(shift) {
     const count = empCount(shift.id);
     if (count > 0) {
       toast(`Cannot remove — ${count} employee${count !== 1 ? 's' : ''} assigned to this shift`, 'error');
       return;
     }
-    removeShift(shift.id);
+    try {
+      await removeShift(shift.id);
+    } catch (err) {
+      toast('Could not remove the shift — please refresh the page and try again.', 'error');
+      return;
+    }
     toast('Shift removed', 'warning');
   }
 
@@ -719,7 +745,7 @@ function ShiftsContent() {
                           <div className="flex items-center gap-1">
                             <Coffee size={11} className="text-amber-400" />
                             <span className="text-[11px] font-medium text-amber-500">
-                              {shift.breaks.reduce((acc, b) => acc + (b.start && b.end ? hhmmDiffMinutes(b.start, b.end) : 0), 0)} min break
+                              {shift.breaks.reduce((acc, b) => acc + (Number(b.durationMinutes) || (b.start && b.end ? hhmmDiffMinutes(b.start, b.end) : 0)), 0)} min break
                             </span>
                           </div>
                         </>

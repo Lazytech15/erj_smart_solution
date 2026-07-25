@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
-import { supabase } from '../utils/supabase';
+import { supabase, withAuthTimeout } from '../utils/supabase';
 import { cacheClear } from '../utils/cache';
 import {
   evaluateABACPolicy,
@@ -12,8 +12,9 @@ import {
   getSessionPolicy,
   clearSessionPolicy,
   isSessionPolicyExpired,
+  isInactivityExpired,
+  touchActivity,
   setLogoutReason,
-  INACTIVITY_TIMEOUT_MS,
 } from '../utils/sessionPolicy';
 
 // How often to poll for a lapsed session policy while the app is sitting
@@ -384,9 +385,15 @@ export function AuthProvider({ children }) {
     // even if the network call below hangs or throws.
     if (reason) setLogoutReason(reason);
     try {
-      await supabase.auth.signOut();
+      // supabase-js's own fetch has a timeout (see utils/supabase.js), but as
+      // a belt-and-suspenders measure — this is the call that gates the
+      // force-logout notice ever reaching the user — never let it hang this
+      // function open longer than a few seconds. If it wins the race, local
+      // state is still cleared below and the user is treated as logged out
+      // locally even if the remote sign-out request is still in flight.
+      await withAuthTimeout(supabase.auth.signOut(), 'signOut');
     } catch (err) {
-      console.warn('supabase.auth.signOut() failed, clearing local session anyway:', err);
+      console.warn('supabase.auth.signOut() failed or timed out, clearing local session anyway:', err);
     } finally {
       clearSessionPolicy();
       cacheClear();
@@ -405,43 +412,68 @@ export function AuthProvider({ children }) {
   }, []);
 
   // ── Session policy enforcement while the app stays open ────────────────────
-  // Two independent watchdogs, both only active while a user is signed in:
-  //  1. Poll every 30s for the policy having lapsed (midnight rollover, or
-  //     24h for "remember me") — catches the case where the tab is just
-  //     left open past the cutoff, no reload involved.
-  //  2. Inactivity timer — 30 minutes with no mouse/keyboard/scroll/touch
-  //     activity force-logs-out. Skipped entirely when "remember me" is on.
+  // Both checks below run off the SAME 30s poll, driven by real wall-clock
+  // timestamps (isSessionPolicyExpired / isInactivityExpired both compare
+  // against Date.now()) rather than a single long-lived setTimeout.
+  //
+  // A raw `setTimeout(fn, 30 * 60 * 1000)` looks right but is not reliable in
+  // practice: browsers throttle (Chrome) or fully suspend ("freeze") timers
+  // in backgrounded/idle tabs, and laptop sleep pauses JS execution outright.
+  // The effect could also silently be torn down/re-created (e.g. every
+  // TOKEN_REFRESHED swaps in a new `user` object reference, re-running this
+  // whole effect and resetting the timer) without that being a real activity
+  // event. Any of those either delays the eventual logout indefinitely or
+  // resets the clock behind the scenes — which is exactly the symptom of
+  // "stayed idle 30+ minutes and never got logged out."
+  //
+  // Polling a persisted `lastActivityAt` timestamp every 30s is self-healing
+  // instead: whenever the interval actually gets to run — even very late,
+  // right after the tab wakes back up — it immediately sees the true idle
+  // duration and acts on it, the same way the midnight/24h policy check
+  // already does.
   useEffect(() => {
     if (!user) return;
 
-    const policy = getSessionPolicy();
-
-    const policyInterval = setInterval(() => {
+    const checkPolicy = () => {
       if (isSessionPolicyExpired()) {
         logout('session_expired');
+      } else if (isInactivityExpired()) {
+        logout('inactivity');
       }
-    }, POLICY_CHECK_INTERVAL_MS);
+    };
 
-    let inactivityTimer = null;
-    let handleActivity = null;
+    const policyInterval = setInterval(checkPolicy, POLICY_CHECK_INTERVAL_MS);
 
-    if (!policy?.rememberMe) {
-      const resetInactivityTimer = () => {
-        if (inactivityTimer) clearTimeout(inactivityTimer);
-        inactivityTimer = setTimeout(() => {
-          logout('inactivity');
-        }, INACTIVITY_TIMEOUT_MS);
-      };
+    // Throttle activity writes — mousemove/scroll fire constantly and there's
+    // no need to hit localStorage on every single one.
+    const ACTIVITY_WRITE_THROTTLE_MS = 5000;
+    let lastWrite = 0;
+    const handleActivity = () => {
+      const now = Date.now();
+      if (now - lastWrite < ACTIVITY_WRITE_THROTTLE_MS) return;
+      lastWrite = now;
+      touchActivity();
+    };
+    ACTIVITY_EVENTS.forEach(evt => window.addEventListener(evt, handleActivity, { passive: true }));
 
-      handleActivity = resetInactivityTimer;
-      ACTIVITY_EVENTS.forEach(evt => window.addEventListener(evt, handleActivity, { passive: true }));
-      resetInactivityTimer();
-    }
+    // Re-check immediately on return-to-tab too, so a stale/backgrounded tab
+    // doesn't have to wait out the rest of the 30s poll interval before the
+    // user sees the notice — this is on top of the interval above, not a
+    // replacement for it (the interval still catches the case where the app
+    // is left open and never brought back to the foreground at all).
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') checkPolicy();
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    // Also catch it right away in case it's already overdue when this effect
+    // (re)attaches, e.g. after a TOKEN_REFRESHED-driven remount.
+    checkPolicy();
 
     return () => {
       clearInterval(policyInterval);
-      if (inactivityTimer) clearTimeout(inactivityTimer);
-      if (handleActivity) ACTIVITY_EVENTS.forEach(evt => window.removeEventListener(evt, handleActivity));
+      ACTIVITY_EVENTS.forEach(evt => window.removeEventListener(evt, handleActivity));
+      document.removeEventListener('visibilitychange', handleVisibility);
     };
   }, [user, logout]);
 

@@ -38,6 +38,12 @@ export function NotificationsProvider({ children }) {
     setLoadingNotifs(true);
     getAnnouncements(subscriptionId).then(data => {
       if (!cancelled) { setAnnouncements(data); setLoadingNotifs(false); }
+    }).catch(err => {
+      // Previously unhandled — a failed/timed-out fetch here (see cache.js)
+      // was an uncaught promise rejection in the console, and left
+      // loadingNotifs stuck true forever with no announcements ever shown.
+      console.warn('[NotificationsContext] getAnnouncements failed:', err?.message || err);
+      if (!cancelled) { setLoadingNotifs(false); }
     });
     return () => { cancelled = true; };
   }, [subscriptionId]);
