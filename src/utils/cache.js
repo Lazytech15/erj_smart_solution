@@ -107,16 +107,28 @@ export async function cached(key, fn, ttlMs = DEFAULT_TTL_MS) {
   if (inFlight.has(key)) return inFlight.get(key);
 
   let safetyTimer;
+  // Previously the safety timeout only gave up *waiting* on fn() — it never
+  // actually cancelled the real request underneath. That left the genuine
+  // network call (and the browser socket it was holding) running in the
+  // background indefinitely. Repeat that a few times (e.g. a 15s poll that
+  // keeps stalling) and every connection to the Supabase host ends up tied
+  // up by zombied requests nobody is waiting on anymore — at which point
+  // EVERY other fetch, including Save/Logout, just queues forever waiting
+  // for a free socket, with no visible network activity and no error.
+  // Passing fn() an AbortController and actually aborting it here tears
+  // down the real connection the moment we give up on it, instead of
+  // leaving it to (maybe) time out on its own later.
+  const controller = new AbortController();
   const promise = (async () => {
     try {
       const safety = new Promise((_, reject) => {
-        safetyTimer = setTimeout(
-          () => reject(new Error(`cached(): "${key}" timed out without settling`)),
-          IN_FLIGHT_SAFETY_TIMEOUT_MS
-        );
+        safetyTimer = setTimeout(() => {
+          controller.abort();
+          reject(new Error(`cached(): "${key}" timed out without settling`));
+        }, IN_FLIGHT_SAFETY_TIMEOUT_MS);
       });
 
-      const value = await Promise.race([fn(), safety]);
+      const value = await Promise.race([fn(controller.signal), safety]);
       clearTimeout(safetyTimer);
       if (value !== null && value !== undefined) {
         cacheSet(key, value, ttlMs);

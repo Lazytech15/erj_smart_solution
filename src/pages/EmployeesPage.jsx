@@ -103,29 +103,51 @@ export default function EmployeesPage() {
     setRemoveConfirmTarget(emp);
   }
 
-  function confirmRemove(emp) {
-    removeEmployee(emp.id);
-    toast(`${[emp.firstName, emp.middleName, emp.lastName, emp.suffix].filter(Boolean).join(' ')} permanently removed`, 'warning');
-    setRemoveConfirmTarget(null);
+  async function confirmRemove(emp) {
+    // Previously fire-and-forget: a failed/timed-out write (e.g. a stale
+    // connection after the tab sat idle) surfaced only as an unhandled
+    // promise rejection, while the UI still claimed the employee was
+    // removed and the modal closed as if it had succeeded.
+    try {
+      await removeEmployee(emp.id);
+      toast(`${[emp.firstName, emp.middleName, emp.lastName, emp.suffix].filter(Boolean).join(' ')} permanently removed`, 'warning');
+    } catch (err) {
+      toast(err.message || 'Could not remove employee — please try again.', 'error');
+    } finally {
+      setRemoveConfirmTarget(null);
+    }
   }
 
-  function confirmDeactivate(emp) {
-    updateEmployee(emp.id, { status: 'inactive' });
-    toast(`${[emp.firstName, emp.middleName, emp.lastName, emp.suffix].filter(Boolean).join(' ')} marked as inactive`, 'success');
-    setRemoveConfirmTarget(null);
+  async function confirmDeactivate(emp) {
+    try {
+      await updateEmployee(emp.id, { status: 'inactive' });
+      toast(`${[emp.firstName, emp.middleName, emp.lastName, emp.suffix].filter(Boolean).join(' ')} marked as inactive`, 'success');
+    } catch (err) {
+      toast(err.message || 'Could not update employee — please try again.', 'error');
+    } finally {
+      setRemoveConfirmTarget(null);
+    }
   }
 
   async function handleEdit(form) {
-    await updateEmployee(editTarget.id, { ...form, firstName: form.firstName ?? editTarget.firstName, lastName: form.lastName ?? editTarget.lastName });
-    toast('Employee updated', 'success');
-    setEditModal(false);
-    setEditTarget(null);
+    try {
+      await updateEmployee(editTarget.id, { ...form, firstName: form.firstName ?? editTarget.firstName, lastName: form.lastName ?? editTarget.lastName });
+      toast('Employee updated', 'success');
+      setEditModal(false);
+      setEditTarget(null);
+    } catch (err) {
+      toast(err.message || 'Could not save changes — please try again.', 'error');
+    }
   }
 
-  function handleToggleStatus(emp) {
+  async function handleToggleStatus(emp) {
     const newStatus = emp.status === 'active' ? 'inactive' : 'active';
-    updateEmployee(emp.id, { status: newStatus });
-    toast(`Employee marked as ${newStatus}`, 'success');
+    try {
+      await updateEmployee(emp.id, { status: newStatus });
+      toast(`Employee marked as ${newStatus}`, 'success');
+    } catch (err) {
+      toast(err.message || 'Could not update employee — please try again.', 'error');
+    }
   }
 
   async function handleApprove(pending) {
@@ -141,17 +163,25 @@ export default function EmployeesPage() {
   }
 
   async function handleReject(pending) {
-    await rejectEmployee(pending.id);
-    const name = [pending.firstName, pending.middleName, pending.lastName, pending.suffix].filter(Boolean).join(' ');
-    toast(`${name}'s request rejected`, 'warning');
-    setPendingTarget(null);
-    setPendingAction(null);
+    try {
+      await rejectEmployee(pending.id);
+      const name = [pending.firstName, pending.middleName, pending.lastName, pending.suffix].filter(Boolean).join(' ');
+      toast(`${name}'s request rejected`, 'warning');
+      setPendingTarget(null);
+      setPendingAction(null);
+    } catch (err) {
+      toast(err.message || 'Could not reject registration — please try again.', 'error');
+    }
   }
 
   async function handleEditPending(pendingId, form) {
-    await editPendingRegistration(pendingId, form);
-    toast('Registration updated', 'success');
-    setPendingAction('approve'); // after edit, go straight to approve confirmation
+    try {
+      await editPendingRegistration(pendingId, form);
+      toast('Registration updated', 'success');
+      setPendingAction('approve'); // after edit, go straight to approve confirmation
+    } catch (err) {
+      toast(err.message || 'Could not save registration — please try again.', 'error');
+    }
   }
 
   return (

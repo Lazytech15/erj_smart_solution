@@ -230,7 +230,21 @@ export default function AttendancePage() {
           (e.accountEmployeeId && String(e.accountEmployeeId) === String(r.employeeId))
         );
         const shift    = employee?.shiftId ? shifts.find(s => String(s.id) === String(employee.shiftId)) : null;
-        return { ...r, employee, shift };
+        // The Shift Clock extension writes raw punches (sessions/segments)
+        // but never computes present/late/absent — that's an admin-facing
+        // judgment call the web app makes by comparing clock-in to shift
+        // start. Records synced straight from the extension can therefore
+        // arrive with no `status` at all. Previously that stayed blank
+        // until someone opened Edit and happened to touch the first
+        // session's clock-in field (the only place status got
+        // recalculated) — until then the record showed no status badge,
+        // didn't match any status filter, AND (see AttendanceModal below)
+        // silently blocked Save. Deriving it here, the same way the edit
+        // form does, means every record that CAN have a status gets one
+        // as soon as it's loaded — not just after someone happens to
+        // re-trigger the calculation by hand.
+        const status = r.status || calcStatus(r.clockIn, shift?.start, lateThreshold) || '';
+        return { ...r, status, employee, shift };
       })
       .filter(r => r.employee);
 
@@ -243,7 +257,7 @@ export default function AttendancePage() {
     return recs.sort((a, b) =>
       `${a.employee.firstName} ${a.employee.lastName}`.localeCompare(`${b.employee.firstName} ${b.employee.lastName}`)
     );
-  }, [attendanceRecords, employees, shifts, date, search, dept, statusFilter]);
+  }, [attendanceRecords, employees, shifts, date, search, dept, statusFilter, lateThreshold]);
 
   function prevDay() { setDate(d => format(subDays(parseISO(d), 1), 'yyyy-MM-dd')); }
   function nextDay() {
@@ -251,16 +265,24 @@ export default function AttendancePage() {
     if (next <= format(new Date(), 'yyyy-MM-dd')) setDate(next);
   }
 
-  function handleAddRecord(form) {
-    addAttendanceRecord({ ...finalizeRecord(form), date });
-    toast('Attendance record added', 'success');
-    setAddModal(false);
+  async function handleAddRecord(form) {
+    try {
+      await addAttendanceRecord({ ...finalizeRecord(form), date });
+      toast('Attendance record added', 'success');
+      setAddModal(false);
+    } catch (err) {
+      toast(err.message || 'Could not save record — please try again.', 'error');
+    }
   }
 
-  function handleEditRecord(form) {
-    updateAttendanceRecord(editRecord.id, finalizeRecord(form, editRecord));
-    toast('Record updated', 'success');
-    setEditRecord(null);
+  async function handleEditRecord(form) {
+    try {
+      await updateAttendanceRecord(editRecord.id, finalizeRecord(form, editRecord));
+      toast('Record updated', 'success');
+      setEditRecord(null);
+    } catch (err) {
+      toast(err.message || 'Could not save record — please try again.', 'error');
+    }
   }
 
   return (
@@ -472,7 +494,9 @@ export default function AttendancePage() {
 }
 
 function AttendanceModal({ open, onClose, onSave, employees, shifts, lateThreshold, title, initial }) {
+  const toast = useToast();
   const [form, setForm] = useState(initial);
+  const [saving, setSaving] = useState(false);
   const f = k => v => setForm(p => ({ ...p, [k]: v }));
 
   const empOptions = [
@@ -520,6 +544,27 @@ function AttendanceModal({ open, onClose, onSave, employees, shifts, lateThresho
     });
   }
 
+  // Previously: onClick={() => { if (form.employeeId && form.status) { onSave(form); } }}
+  // If either field was falsy — e.g. a record synced from the mobile app
+  // with no computed status yet, or employees still loading — this was a
+  // TOTAL no-op: no onSave call, no toast, no console output, nothing.
+  // From the user's side that's indistinguishable from the button being
+  // dead code, and only a full page reload (which re-derives employeeId/
+  // status fresh) would happen to clear the condition. Every path below
+  // now gives explicit feedback instead of silently doing nothing.
+  async function handleSave() {
+    if (!form.employeeId) { toast('Please select an employee', 'error'); return; }
+    if (!form.status) { toast('Could not determine attendance status — try re-selecting the employee or clock-in time', 'error'); return; }
+    setSaving(true);
+    try {
+      await onSave(form);
+    } catch (err) {
+      toast(err.message || 'Could not save — please try again.', 'error');
+    } finally {
+      setSaving(false);
+    }
+  }
+
   const sessions = form.sessions || [];
 
   return (
@@ -527,7 +572,7 @@ function AttendanceModal({ open, onClose, onSave, employees, shifts, lateThresho
       footer={
         <>
           <button className="btn-secondary" onClick={onClose}>Cancel</button>
-          <button className="btn-primary" onClick={() => { if (form.employeeId && form.status) { onSave(form); } }}>Save</button>
+          <button className="btn-primary" disabled={saving} onClick={handleSave}>{saving ? 'Saving…' : 'Save'}</button>
         </>
       }
     >

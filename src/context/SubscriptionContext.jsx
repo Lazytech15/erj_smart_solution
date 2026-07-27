@@ -465,25 +465,41 @@ export function SubscriptionProvider({ children }) {
   const updateSettings     = useCallback((upd)     => update(prev => ({ ...prev, settings: { ...prev.settings, ...upd } })), [update]);
 
   // ── Attendance ────────────────────────────────────────────────────────────────
-  const addAttendanceRecord = useCallback((record) => {
+  // Previously putAttendanceRecords() was fired-and-forgotten from inside the
+  // setSubscription updater with no await and no catch: a failed/timed-out
+  // write (e.g. a stale connection after the tab sat idle) surfaced only as
+  // an unhandled promise rejection, while the local state (and the calling
+  // page's success toast) still showed the record as saved. These are now
+  // async, await the persist, and roll back the optimistic local update on
+  // failure — same pattern as the core `update()` mutator above — so callers
+  // can catch the rejection and tell the user it didn't actually save.
+  const addAttendanceRecord = useCallback(async (record) => {
     const newRecord = { ...record, id: `att_${Date.now()}_${Math.random().toString(36).slice(2, 6)}` };
-    setSubscription(prev => {
-      if (!prev) return prev;
-      const updated = { ...prev, attendanceRecords: [...prev.attendanceRecords, newRecord] };
+    const current = subRef.current;
+    if (!current) throw new Error('subscription-not-loaded');
+    const updatedRecords = [...current.attendanceRecords, newRecord];
+    setSubscription({ ...current, attendanceRecords: updatedRecords });
+    try {
       // Only patch attendance_records column — avoids overwriting mobile clock-ins
-      putAttendanceRecords(prev.subscriptionId, updated.attendanceRecords);
-      return updated;
-    });
+      await putAttendanceRecords(current.subscriptionId, updatedRecords);
+    } catch (err) {
+      setSubscription(current); // roll back
+      throw err;
+    }
   }, []); // eslint-disable-line
 
-  const updateAttendanceRecord = useCallback((recordId, updates) => {
-    setSubscription(prev => {
-      if (!prev) return prev;
-      const updatedRecords = prev.attendanceRecords.map(r => r.id === recordId ? { ...r, ...updates } : r);
+  const updateAttendanceRecord = useCallback(async (recordId, updates) => {
+    const current = subRef.current;
+    if (!current) throw new Error('subscription-not-loaded');
+    const updatedRecords = current.attendanceRecords.map(r => r.id === recordId ? { ...r, ...updates } : r);
+    setSubscription({ ...current, attendanceRecords: updatedRecords });
+    try {
       // Only patch attendance_records column — avoids overwriting mobile clock-ins
-      putAttendanceRecords(prev.subscriptionId, updatedRecords);
-      return { ...prev, attendanceRecords: updatedRecords };
-    });
+      await putAttendanceRecords(current.subscriptionId, updatedRecords);
+    } catch (err) {
+      setSubscription(current); // roll back
+      throw err;
+    }
   }, []); // eslint-disable-line
 
   // ── Leave ─────────────────────────────────────────────────────────────────────

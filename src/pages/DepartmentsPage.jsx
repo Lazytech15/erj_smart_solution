@@ -14,21 +14,29 @@ function DepartmentsContent() {
   const [addModal, setAddModal] = useState(false);
   const [newName, setNewName] = useState('');
 
-  function handleAdd() {
+  async function handleAdd() {
     const name = newName.trim();
     if (!name) return;
     if (departments.includes(name)) { toast('Department already exists', 'warning'); return; }
-    addDepartment(name);
-    toast(`Department "${name}" added`, 'success');
-    setNewName('');
-    setAddModal(false);
+    try {
+      await addDepartment(name);
+      toast(`Department "${name}" added`, 'success');
+      setNewName('');
+      setAddModal(false);
+    } catch (err) {
+      toast(err.message || 'Could not add department — please try again.', 'error');
+    }
   }
 
-  function handleRemove(name) {
+  async function handleRemove(name) {
     const count = employees.filter(e => e.department === name).length;
     if (count > 0) { toast(`Cannot remove: ${count} employee(s) are in this department`, 'error'); return; }
-    removeDepartment(name);
-    toast(`Department "${name}" removed`, 'warning');
+    try {
+      await removeDepartment(name);
+      toast(`Department "${name}" removed`, 'warning');
+    } catch (err) {
+      toast(err.message || 'Could not remove department — please try again.', 'error');
+    }
   }
 
   return (

@@ -184,9 +184,17 @@ export default function SettingsPage() {
     );
   }
 
-  function handleSave() {
-    updateSettings(settings);
-    toast('Settings saved', 'success');
+  async function handleSave() {
+    try {
+      await updateSettings(settings);
+      toast('Settings saved', 'success');
+    } catch (err) {
+      // Previously fire-and-forget: a failed/timed-out write (e.g. a stale
+      // connection after the tab sat idle) surfaced only as an unhandled
+      // promise rejection in the console, while the UI still claimed
+      // "Settings saved" and nothing was actually persisted.
+      toast(err.message || 'Could not save settings — please try again.', 'error');
+    }
   }
 
   const goUpgrade = () => navigate('/app/subscription');

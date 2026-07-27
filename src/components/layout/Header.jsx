@@ -21,6 +21,7 @@ export default function Header({ title, onMenuClick }) {
 
   const [showNotifs, setShowNotifs] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
 
   const totalBadge = unreadCount + pendingCount;
 
@@ -273,11 +274,25 @@ export default function Header({ title, onMenuClick }) {
                 </button>
                 {/* Logout */}
                 <button
-                  onClick={async () => { setShowProfile(false); await logout(); navigate('/login'); }}
-                  className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm font-medium text-red-500 hover:bg-red-50 transition-colors border-t border-slate-100"
+                  disabled={loggingOut}
+                  onClick={async () => {
+                    // signOut() can legitimately take up to ~30s to resolve if
+                    // the underlying connection is stalled (see supabase.js's
+                    // withAuthTimeout failsafe) — without this, the click
+                    // looks like it did nothing for that whole window.
+                    setLoggingOut(true);
+                    try {
+                      await logout();
+                    } finally {
+                      setLoggingOut(false);
+                      setShowProfile(false);
+                      navigate('/login');
+                    }
+                  }}
+                  className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm font-medium text-red-500 hover:bg-red-50 transition-colors border-t border-slate-100 disabled:opacity-60 disabled:cursor-wait"
                 >
                   <LogOut size={14} />
-                  Log Out
+                  {loggingOut ? 'Logging out…' : 'Log Out'}
                 </button>
               </div>
             </>

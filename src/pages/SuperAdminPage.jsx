@@ -405,7 +405,16 @@ function EditSubscriptionModal({ sub, onClose, onSave }) {
           <button onClick={onClose} className="btn-ghost px-4 py-2 rounded-lg text-sm">Cancel</button>
           <button
             disabled={saving}
-            onClick={async () => { setSaving(true); await onSave(planId, status); setSaving(false); }}
+            onClick={async () => {
+              setSaving(true);
+              try {
+                await onSave(planId, status);
+              } catch (err) {
+                console.warn('[EditSubscriptionModal] save failed:', err?.message || err);
+              } finally {
+                setSaving(false);
+              }
+            }}
             className="px-4 py-2 rounded-lg text-sm font-semibold text-white"
             style={{ background: '#4f46e5' }}
           >
@@ -454,7 +463,16 @@ function PermissionsModal({ account, onClose, onSave }) {
           <button onClick={onClose} className="btn-ghost px-4 py-2 rounded-lg text-sm">Cancel</button>
           <button
             disabled={saving}
-            onClick={async () => { setSaving(true); await onSave([...selected]); setSaving(false); }}
+            onClick={async () => {
+              setSaving(true);
+              try {
+                await onSave([...selected]);
+              } catch (err) {
+                console.warn('[PermissionsModal] save failed:', err?.message || err);
+              } finally {
+                setSaving(false);
+              }
+            }}
             className="px-4 py-2 rounded-lg text-sm font-semibold text-white"
             style={{ background: '#4f46e5' }}
           >
@@ -497,7 +515,16 @@ function ResetPasswordModal({ account, onClose, onSave }) {
           <button onClick={onClose} className="btn-ghost px-4 py-2 rounded-lg text-sm">Cancel</button>
           <button
             disabled={saving || password.length < 6}
-            onClick={async () => { setSaving(true); await onSave(password); setSaving(false); }}
+            onClick={async () => {
+              setSaving(true);
+              try {
+                await onSave(password);
+              } catch (err) {
+                console.warn('[ResetPasswordModal] save failed:', err?.message || err);
+              } finally {
+                setSaving(false);
+              }
+            }}
             className="px-4 py-2 rounded-lg text-sm font-semibold text-white"
             style={{ background: '#4f46e5' }}
           >

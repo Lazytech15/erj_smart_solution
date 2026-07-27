@@ -40,11 +40,12 @@ const READ_TTL_MS = 60_000;
  * Used by legacy callers — prefer fetching by auth_uid where possible.
  */
 export async function getAccount(email) {
-  return cached(`account:${email}`, async () => {
+  return cached(`account:${email}`, async (signal) => {
     const { data, error } = await supabase
       .from('accounts')
       .select('auth_uid, email, role, name, employee_id, subscription_id, created_at, avatar_url, two_factor_enabled')
       .eq('email', email)
+      .abortSignal(signal)
       .maybeSingle();
     if (error || !data) return null;
 
@@ -90,11 +91,11 @@ export async function putAccount(account) {
 // ─── Subscription helpers ─────────────────────────────────────────────────────
 
 export async function getSubscription(subscriptionId) {
-  return cached(`subscription:${subscriptionId}`, async () => {
+  return cached(`subscription:${subscriptionId}`, async (signal) => {
     // Fetch subscription and employee accounts in parallel.
     const [{ data, error }, { data: accountRows }] = await Promise.all([
-      supabase.from('subscriptions').select('*').eq('subscription_id', subscriptionId).single(),
-      supabase.from('accounts').select('employee_id, name').eq('subscription_id', subscriptionId).eq('role', 'employee'),
+      supabase.from('subscriptions').select('*').eq('subscription_id', subscriptionId).abortSignal(signal).single(),
+      supabase.from('accounts').select('employee_id, name').eq('subscription_id', subscriptionId).eq('role', 'employee').abortSignal(signal),
     ]);
     if (error) return null;
 
@@ -187,11 +188,12 @@ export async function putSubscription(state) {
 const PENDING_SENSITIVE_FIELDS = ['password'];
 
 export async function getPendingRegistrations(subscriptionId) {
-  return cached(`pending:${subscriptionId}`, async () => {
+  return cached(`pending:${subscriptionId}`, async (signal) => {
     const { data, error } = await supabase
       .from('pending_registrations')
       .select('*')
       .eq('subscription_id', subscriptionId)
+      .abortSignal(signal)
       .order('submitted_at', { ascending: true });
     if (error) return [];
 
@@ -302,11 +304,12 @@ export async function deletePendingRegistration(id) {
 // No sensitive fields — no encryption needed here.
 
 export async function getAnnouncements(subscriptionId) {
-  return cached(`announcements:${subscriptionId}`, async () => {
+  return cached(`announcements:${subscriptionId}`, async (signal) => {
     const { data, error } = await supabase
       .from('announcements')
       .select('*')
       .eq('subscription_id', subscriptionId)
+      .abortSignal(signal)
       .order('created_at', { ascending: false });
     if (error) return [];
     return data.map(r => ({
@@ -469,12 +472,13 @@ export async function updateEmployeeAccount(employeeId, { username, password, na
 }
 
 export async function getEmployeeAccount(employeeId) {
-  return cached(`empacct:${employeeId}`, async () => {
+  return cached(`empacct:${employeeId}`, async (signal) => {
     const { data, error } = await supabase
       .from('accounts')
       .select('auth_uid, email, name, username')
       .eq('employee_id', employeeId)
       .eq('role', 'employee')
+      .abortSignal(signal)
       .maybeSingle();
     if (error || !data) return null;
     return { authUid: data.auth_uid, username: data.username, email: data.email, name: data.name };
@@ -484,11 +488,12 @@ export async function getEmployeeAccount(employeeId) {
 // ─── Attendance-only helpers ───────────────────────────────────────────────────
 
 export async function getAttendanceRecords(subscriptionId) {
-  return cached(`attendance:${subscriptionId}`, async () => {
+  return cached(`attendance:${subscriptionId}`, async (signal) => {
     const { data, error } = await supabase
       .from('subscriptions')
       .select('attendance_records')
       .eq('subscription_id', subscriptionId)
+      .abortSignal(signal)
       .single();
     if (error) return null;
     return (data.attendance_records ?? []).map(r => ({
@@ -521,10 +526,11 @@ export async function putAttendanceRecords(subscriptionId, records) {
  * (no need to drag the entire enrolled_employees/attendance blobs along).
  */
 export async function getAllSubscriptionsSummary() {
-  return cached('superadmin:subscriptions', async () => {
+  return cached('superadmin:subscriptions', async (signal) => {
     const { data, error } = await supabase
       .from('subscriptions')
       .select('subscription_id, plan_id, company, billing, status, trial_ends_at, created_at, enrolled_employees')
+      .abortSignal(signal)
       .order('created_at', { ascending: false });
     if (error) throw error;
     return (data ?? []).map(row => ({
@@ -568,10 +574,11 @@ export async function adminDeleteSubscription(subscriptionId) {
 
 /** Every account (admin / hr / manager / employee / superadmin) on the platform. */
 export async function getAllAccounts() {
-  return cached('superadmin:accounts', async () => {
+  return cached('superadmin:accounts', async (signal) => {
     const { data, error } = await supabase
       .from('accounts')
       .select('auth_uid, email, role, name, employee_id, subscription_id, permissions, created_at')
+      .abortSignal(signal)
       .order('created_at', { ascending: false });
     if (error) throw error;
     return (data ?? []).map(r => ({
