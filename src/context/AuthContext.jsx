@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
-import { supabase, withAuthTimeout } from '../utils/supabase';
+import { supabase, withAuthTimeout, SESSION_UNVERIFIABLE_EVENT } from '../utils/supabase';
 import { cacheClear } from '../utils/cache';
 import {
   evaluateABACPolicy,
@@ -53,6 +53,24 @@ export function AuthProvider({ children }) {
 
   const pendingUserRef = useRef(null);
   const pendingAbacRef = useRef(null);
+
+  // ── Repeated login-timeout tracking ─────────────────────────────────────────
+  // A login timeout can mean two very different things:
+  //   1. A one-off slow connection — retrying (same tab) is a reasonable ask.
+  //   2. The browser's connection pool to the Supabase host is exhausted by
+  //      zombied sockets left over from an earlier stalled request (JS-level
+  //      abort() doesn't guarantee the OS socket actually closes — see the
+  //      comments in utils/supabase.js and utils/cache.js). In this case every
+  //      new request, including the profile fetch inside finishLogin(), just
+  //      queues forever waiting for a free socket. forceResetStuckAuthState()
+  //      and cacheForceClearInFlight() only clear this app's own JS bookkeeping
+  //      — they can't force the browser to release a stuck socket. Only a full
+  //      reload (which resets the browser's connection pool) actually recovers.
+  // Retrying "same tab, no reload" after a timeout can't distinguish these —
+  // so if it happens twice in a row, stop suggesting "try again" and tell the
+  // user to reload instead, since that's the only thing that will actually work.
+  const consecutiveLoginTimeoutsRef = useRef(0);
+  const LOGIN_TIMEOUT_RELOAD_THRESHOLD = 2;
 
   // ── Bootstrap: restore session on mount ────────────────────────────────────
   // Guards against the app getting stuck on the loading screen forever:
@@ -287,73 +305,160 @@ export function AuthProvider({ children }) {
     return { user: safe, abac: abacResult };
   }, []);
 
+  // Login involves several sequential awaited steps (sign-in → MFA check →
+  // profile fetch → ABAC/geo check), each already protected by its own
+  // internal timeout (the auth lock, the per-fetch timeout, the geo-lookup
+  // timeout). Those are individually correct but not unified: on a slow or
+  // degraded connection they can each legitimately run close to their own
+  // worst case, and since the steps run one after another, the *total* wait
+  // stacks up to 30-45s+ before the user sees any feedback — indistinguishable
+  // from a true hang. Wrapping the whole flow in one AUTH_CALL_TIMEOUT_MS
+  // deadline (same shared constant `logout()` already uses) means the UI
+  // always fails fast with a clear error instead of an indefinite spinner.
   const login = useCallback(async (email, password, rememberMe = false) => {
-    // Block the onAuthStateChange SIGNED_IN listener from the very start —
-    // signInWithPassword() fires SIGNED_IN internally as soon as it
-    // establishes a session, before its own promise resolves to us. If the
-    // guard were only set later (e.g. after the MFA check below, which adds
-    // its own awaits), the listener's `if (!pendingUserRef.current)` branch
-    // would race ahead, fetch the profile, and log the user straight in —
-    // skipping the two-factor prompt entirely. Setting a sentinel here keeps
-    // the guard closed for the whole flow, same fix as registerCompanyAdmin.
-    pendingUserRef.current = true;
+    // Plain closure variable, not something read off the rejected error —
+    // when finishLogin() genuinely hangs (queued behind a jammed connection
+    // pool, not just slow), it never gets the chance to reject at all. It's
+    // the OUTER withAuthTimeout race below that fires instead, with its own
+    // generic "login timed out" — at that point the inner IIFE is simply
+    // abandoned mid-flight, not caught. So the only reliable way to know
+    // "were credentials already accepted before this timeout" is to record
+    // it synchronously the moment it's true, not to inspect the error.
+    let credentialsVerified = false;
 
-    // ── Credential check via Supabase Auth ──────────────────────────────────
-    const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
-      email,
-      password,
+    return withAuthTimeout((async () => {
+      // Block the onAuthStateChange SIGNED_IN listener from the very start —
+      // signInWithPassword() fires SIGNED_IN internally as soon as it
+      // establishes a session, before its own promise resolves to us. If the
+      // guard were only set later (e.g. after the MFA check below, which adds
+      // its own awaits), the listener's `if (!pendingUserRef.current)` branch
+      // would race ahead, fetch the profile, and log the user straight in —
+      // skipping the two-factor prompt entirely. Setting a sentinel here keeps
+      // the guard closed for the whole flow, same fix as registerCompanyAdmin.
+      pendingUserRef.current = true;
+
+      // ── Credential check via Supabase Auth ──────────────────────────────
+      const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
+
+      if (signInError) {
+        pendingUserRef.current = null; // release the guard — sign-in never happened
+        recordLoginAttempt(email, false);
+        // Surface a friendly message instead of Supabase's raw error
+        throw new Error('Invalid email or password');
+      }
+
+      const authUser = signInData.user;
+
+      // ── Two-factor check ─────────────────────────────────────────────────
+      // signInWithPassword() only grants "aal1". If the account has a verified
+      // TOTP factor, Supabase requires stepping up to "aal2" before the
+      // session is fully trusted — surface that to the caller instead of
+      // completing login, so the UI can prompt for the 6-digit code.
+      const { data: aal } = await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
+      if (aal && aal.nextLevel === 'aal2' && aal.nextLevel !== aal.currentLevel) {
+        // Keep the guard closed (pendingUserRef stays truthy) — the session is
+        // live at aal1 but must not be treated as logged in yet. It's released
+        // once verifyMfaAndLogin() finishes (success → real user object) or
+        // the login page cancels the challenge (which signs the session out,
+        // triggering the SIGNED_OUT branch instead).
+        const { data: factorsData } = await supabase.auth.mfa.listFactors();
+        const factor = factorsData?.totp?.find(f => f.status === 'verified');
+        const mfaError = new Error('Two-factor code required.');
+        mfaError.mfaRequired = true;
+        mfaError.factorId = factor?.id ?? null;
+        throw mfaError;
+      }
+
+      // From here on, Supabase Auth has already accepted the credentials and
+      // persisted a real session (visible in its own localStorage token) —
+      // any timeout past this point is NOT a failed sign-in, it's
+      // finishLogin() (profile fetch / ABAC check) stalling behind the
+      // jammed connection pool.
+      credentialsVerified = true;
+
+      const result = await finishLogin(authUser, email, rememberMe);
+      // A real, successful login (even if a later attempt in this same tab
+      // times out) means the connection pool wasn't actually the problem —
+      // reset the counter so a single unlucky timeout later doesn't
+      // immediately jump straight to "please reload".
+      consecutiveLoginTimeoutsRef.current = 0;
+      return result;
+    })(), 'login').catch(err => {
+      // A raw timeout rejection ("login timed out") isn't friendly UI copy,
+      // and — same reasoning as signIn errors above — a stuck attempt should
+      // release the pendingUserRef guard so the next real attempt isn't
+      // blocked behind a phantom "login in progress" state.
+      if (!err.mfaRequired) {
+        pendingUserRef.current = null;
+        if (/timed out/.test(err.message)) {
+          consecutiveLoginTimeoutsRef.current += 1;
+
+          if (credentialsVerified) {
+            // Credentials were already accepted and a real session already
+            // exists — re-entering the password and hitting "Sign in" again
+            // would be redundant (and confusing, since it'll look like it's
+            // "checking" credentials that were never wrong). Reload is the
+            // correct — and immediate, not "try twice first" — next step,
+            // since bootstrap's getSession() will pick the existing session
+            // straight up.
+            const reloadErr = new Error(
+              "You're signed in — the app just couldn't finish loading your account. Please reload the page to continue."
+            );
+            reloadErr.needsReload = true;
+            throw reloadErr;
+          }
+
+          // First timeout before credentials were even verified: could just
+          // be a slow connection — a same-tab retry is a reasonable next
+          // step, so keep the original friendly copy.
+          if (consecutiveLoginTimeoutsRef.current < LOGIN_TIMEOUT_RELOAD_THRESHOLD) {
+            throw new Error('Sign in is taking too long. Please check your connection and try again.');
+          }
+          // Repeated timeouts in the same tab, with no reload in between,
+          // point at a wedged browser connection pool rather than a
+          // transient network blip — retrying again here would just queue
+          // behind the same stuck sockets. Flag it so the UI can stop
+          // suggesting "try again" and offer a reload instead, which is the
+          // only thing that actually clears this.
+          const reloadErr = new Error(
+            "Sign-in keeps stalling in this tab. This usually clears up with a page reload — please reload and try again."
+          );
+          reloadErr.needsReload = true;
+          throw reloadErr;
+        }
+      }
+      throw err;
     });
-
-    if (signInError) {
-      pendingUserRef.current = null; // release the guard — sign-in never happened
-      recordLoginAttempt(email, false);
-      // Surface a friendly message instead of Supabase's raw error
-      throw new Error('Invalid email or password');
-    }
-
-    const authUser = signInData.user;
-
-    // ── Two-factor check ─────────────────────────────────────────────────────
-    // signInWithPassword() only grants "aal1". If the account has a verified
-    // TOTP factor, Supabase requires stepping up to "aal2" before the
-    // session is fully trusted — surface that to the caller instead of
-    // completing login, so the UI can prompt for the 6-digit code.
-    const { data: aal } = await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
-    if (aal && aal.nextLevel === 'aal2' && aal.nextLevel !== aal.currentLevel) {
-      // Keep the guard closed (pendingUserRef stays truthy) — the session is
-      // live at aal1 but must not be treated as logged in yet. It's released
-      // once verifyMfaAndLogin() finishes (success → real user object) or
-      // the login page cancels the challenge (which signs the session out,
-      // triggering the SIGNED_OUT branch instead).
-      const { data: factorsData } = await supabase.auth.mfa.listFactors();
-      const factor = factorsData?.totp?.find(f => f.status === 'verified');
-      const mfaError = new Error('Two-factor code required.');
-      mfaError.mfaRequired = true;
-      mfaError.factorId = factor?.id ?? null;
-      throw mfaError;
-    }
-
-    return finishLogin(authUser, email, rememberMe);
   }, [finishLogin]);
 
   // ── verifyMfaAndLogin ────────────────────────────────────────────────────
   // Completes login after `login()` threw `{ mfaRequired: true, factorId }`.
   const verifyMfaAndLogin = useCallback(async (factorId, code, email, rememberMe = false) => {
-    const { data: challenge, error: challengeError } = await supabase.auth.mfa.challenge({ factorId });
-    if (challengeError) throw new Error(challengeError.message || 'Could not start verification.');
+    return withAuthTimeout((async () => {
+      const { data: challenge, error: challengeError } = await supabase.auth.mfa.challenge({ factorId });
+      if (challengeError) throw new Error(challengeError.message || 'Could not start verification.');
 
-    const { data: verifyData, error: verifyError } = await supabase.auth.mfa.verify({
-      factorId,
-      challengeId: challenge.id,
-      code,
+      const { data: verifyData, error: verifyError } = await supabase.auth.mfa.verify({
+        factorId,
+        challengeId: challenge.id,
+        code,
+      });
+      if (verifyError) {
+        recordLoginAttempt(email, false);
+        throw new Error('Invalid or expired code. Please try again.');
+      }
+
+      const authUser = verifyData.user;
+      return finishLogin(authUser, email, rememberMe);
+    })(), 'verifyMfaAndLogin').catch(err => {
+      if (/timed out/.test(err.message)) {
+        throw new Error('Verification is taking too long. Please check your connection and try again.');
+      }
+      throw err;
     });
-    if (verifyError) {
-      recordLoginAttempt(email, false);
-      throw new Error('Invalid or expired code. Please try again.');
-    }
-
-    const authUser = verifyData.user;
-    return finishLogin(authUser, email, rememberMe);
   }, [finishLogin]);
 
   // ── commitLogin ─────────────────────────────────────────────────────────────
@@ -410,6 +515,21 @@ export function AuthProvider({ children }) {
       setUser(null);
     }
   }, []);
+
+  // ── React to unverifiable sessions (see supabase.js's checkSessionOnResume) ─
+  // If a resume-time session check times out, the app can no longer trust
+  // that the current session is real — rather than leaving reads/writes
+  // failing silently forever (requiring a manual reload to recover), force
+  // a clean, visible logout so the person gets a clear "please sign in
+  // again" instead of a frozen page. Only acts while actually signed in —
+  // no-op on the login page itself.
+  useEffect(() => {
+    function handleUnverifiable() {
+      if (user) logout('session_unverifiable');
+    }
+    window.addEventListener(SESSION_UNVERIFIABLE_EVENT, handleUnverifiable);
+    return () => window.removeEventListener(SESSION_UNVERIFIABLE_EVENT, handleUnverifiable);
+  }, [user, logout]);
 
   // ── Session policy enforcement while the app stays open ────────────────────
   // Both checks below run off the SAME 30s poll, driven by real wall-clock

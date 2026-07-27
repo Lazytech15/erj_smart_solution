@@ -7,19 +7,24 @@
  *   setPendingEmployeesExternal so EmployeesPage always has fresh data
  * - Exposes pendingEmployees directly so Header can list them as notifications
  */
-import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
-import { supabase } from '../utils/supabase';
+import { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import {
   getAnnouncements,
   markAnnouncementRead,
   markAllAnnouncementsRead,
   insertAnnouncement,
   deleteAnnouncement,
+  getPendingRegistrations,
 } from '../utils/db';
+import { forceResetStuckAuthState } from '../utils/supabase';
+import { cacheForceClearInFlight } from '../utils/cache';
 import { useAuth } from './AuthContext';
 import { useSubscription } from './SubscriptionContext';
 
 const NotificationsContext = createContext(null);
+
+// Same threshold/reasoning as SubscriptionContext's attendance poll.
+const STUCK_STATE_THRESHOLD = 3;
 
 export function NotificationsProvider({ children }) {
   const { user } = useAuth();
@@ -29,7 +34,6 @@ export function NotificationsProvider({ children }) {
 
   const [announcements, setAnnouncements] = useState([]);
   const [loadingNotifs, setLoadingNotifs] = useState(false);
-  const channelRef = useRef(null);
 
   // ── Initial load ───────────────────────────────────────────────────────────
   useEffect(() => {
@@ -48,123 +52,77 @@ export function NotificationsProvider({ children }) {
     return () => { cancelled = true; };
   }, [subscriptionId]);
 
-  // ── Supabase Realtime channel ──────────────────────────────────────────────
+  // ── Poll announcements + pending registrations (replaces Supabase Realtime) ──
+  // This used to be a `supabase.channel(...).on('postgres_changes', ...)`
+  // websocket subscription with 6 separate listeners. That kept a permanent
+  // open connection to the Supabase host per signed-in tab and was the
+  // dominant cost in the project's Query Performance dashboard (a
+  // `wal->>...` WAL-decoding query responsible for the large majority of
+  // total DB time). It was also implicated in the login hang: browsers cap
+  // concurrent connections per host (6 for HTTP/1.1), so a live websocket
+  // plus the attendance poll could exhaust that pool — after which every
+  // *other* fetch to the same host (including signInWithPassword) simply
+  // queued forever with no visible network activity and no error, only
+  // recoverable with a full page reload.
+  //
+  // A plain visibility-aware poll (same pattern as the attendance poll
+  // below) needs a normal short-lived HTTP request instead of a permanent
+  // socket, degrades gracefully on failure, and can't starve other requests
+  // of a connection slot.
   useEffect(() => {
     if (!subscriptionId) return;
 
-    if (channelRef.current) {
-      supabase.removeChannel(channelRef.current);
-      channelRef.current = null;
+    let cancelled = false;
+    let consecutiveFailures = 0;
+
+    async function tick() {
+      if (document.visibilityState !== 'visible') return; // don't poll while backgrounded
+      try {
+        const [notifs, pending] = await Promise.all([
+          getAnnouncements(subscriptionId),
+          getPendingRegistrations(subscriptionId),
+        ]);
+        if (cancelled) return;
+        consecutiveFailures = 0;
+        setAnnouncements(prev => (JSON.stringify(prev) === JSON.stringify(notifs) ? prev : notifs));
+        if (setPendingEmployeesExternal) {
+          setPendingEmployeesExternal(prev =>
+            JSON.stringify(prev) === JSON.stringify(pending) ? prev : pending
+          );
+        }
+      } catch (err) {
+        consecutiveFailures++;
+        console.warn('[NotificationsContext] notifications poll failed:', err?.message || err);
+        // See SubscriptionContext's attendance poll for the full reasoning:
+        // repeated timeouts against a healthy backend point to a wedged
+        // internal lock/in-flight promise, not real network conditions.
+        if (consecutiveFailures === STUCK_STATE_THRESHOLD) {
+          forceResetStuckAuthState();
+          cacheForceClearInFlight();
+        }
+      }
     }
 
-    const channel = supabase
-      .channel(`realtime:${subscriptionId}`)
+    const BASE_INTERVAL_MS = 20000;
+    const MAX_INTERVAL_MS = 120000; // back off to at most once every 2 min
+    let timeoutId = setTimeout(runAndReschedule, BASE_INTERVAL_MS);
 
-      // ── Announcements ──
-      .on(
-        'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'announcements', filter: `subscription_id=eq.${subscriptionId}` },
-        ({ new: row }) => {
-          setAnnouncements(prev => [{
-            id:             row.id,
-            subscriptionId: row.subscription_id,
-            title:          row.title,
-            body:           row.body,
-            type:           row.type,
-            isRead:         row.is_read,
-            createdAt:      row.created_at,
-          }, ...prev]);
-        }
-      )
-      .on(
-        'postgres_changes',
-        { event: 'UPDATE', schema: 'public', table: 'announcements', filter: `subscription_id=eq.${subscriptionId}` },
-        ({ new: row }) => {
-          setAnnouncements(prev => prev.map(a => a.id === row.id
-            ? { ...a, isRead: row.is_read, title: row.title, body: row.body, type: row.type }
-            : a
-          ));
-        }
-      )
-      .on(
-        'postgres_changes',
-        { event: 'DELETE', schema: 'public', table: 'announcements' },
-        ({ old: row }) => {
-          setAnnouncements(prev => prev.filter(a => a.id !== row.id));
-        }
-      )
+    async function runAndReschedule() {
+      await tick();
+      if (cancelled) return;
+      const delay = Math.min(BASE_INTERVAL_MS * 2 ** consecutiveFailures, MAX_INTERVAL_MS);
+      timeoutId = setTimeout(runAndReschedule, delay);
+    }
 
-      // ── Pending registrations — keep SubscriptionContext in sync ──
-      .on(
-        'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'pending_registrations', filter: `subscription_id=eq.${subscriptionId}` },
-        ({ new: row }) => {
-          const entry = {
-            id:             row.id,
-            subscriptionId: row.subscription_id,
-            firstName:      row.first_name,
-            middleName:     row.middle_name   ?? '',
-            lastName:       row.last_name,
-            suffix:         row.suffix        ?? '',
-            email:          row.email,
-            phone:          row.phone         ?? '',
-            role:           row.role,
-            department:     row.department    ?? '',
-            joinDate:       row.join_date     ?? '',
-            shiftId:        row.shift_id      ?? '',
-            employeeCode:   row.employee_code ?? '',
-            notes:          row.notes         ?? '',
-            submittedAt:    row.submitted_at,
-            username:       row.username       ?? '',
-            password:       row.password       ?? '',
-          };
-          if (setPendingEmployeesExternal) {
-            setPendingEmployeesExternal(prev =>
-              prev.some(p => p.id === entry.id) ? prev : [...prev, entry]
-            );
-          }
-        }
-      )
-      .on(
-        'postgres_changes',
-        { event: 'UPDATE', schema: 'public', table: 'pending_registrations', filter: `subscription_id=eq.${subscriptionId}` },
-        ({ new: row }) => {
-          if (setPendingEmployeesExternal) {
-            setPendingEmployeesExternal(prev => prev.map(p => p.id === row.id ? {
-              ...p,
-              firstName:    row.first_name,
-              middleName:   row.middle_name   ?? '',
-              lastName:     row.last_name,
-              suffix:       row.suffix        ?? '',
-              email:        row.email,
-              phone:        row.phone         ?? '',
-              role:         row.role,
-              department:   row.department    ?? '',
-              joinDate:     row.join_date     ?? '',
-              shiftId:      row.shift_id      ?? '',
-              employeeCode: row.employee_code ?? '',
-              notes:        row.notes         ?? '',
-            } : p));
-          }
-        }
-      )
-      .on(
-        'postgres_changes',
-        { event: 'DELETE', schema: 'public', table: 'pending_registrations' },
-        ({ old: row }) => {
-          if (setPendingEmployeesExternal) {
-            setPendingEmployeesExternal(prev => prev.filter(p => p.id !== row.id));
-          }
-        }
-      )
-
-      .subscribe();
-
-    channelRef.current = channel;
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') tick();
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
 
     return () => {
-      supabase.removeChannel(channel);
-      channelRef.current = null;
+      cancelled = true;
+      clearTimeout(timeoutId);
+      document.removeEventListener('visibilitychange', handleVisibility);
     };
   }, [subscriptionId]); // eslint-disable-line
 

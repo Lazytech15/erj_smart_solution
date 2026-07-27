@@ -1,4 +1,4 @@
-import { supabase, fetchWithTimeout } from './supabase';
+import { supabase, fetchWithTimeout, withDbTimeout } from './supabase';
 import { createClient } from '@supabase/supabase-js';
 import { encryptField, decryptField, encryptFields, decryptFields } from './crypto';
 import { cached, cacheInvalidate } from './cache';
@@ -83,7 +83,7 @@ export async function putAccount(account) {
   if (account.avatarUrl !== undefined)        row.avatar_url = account.avatarUrl;
   if (account.twoFactorEnabled !== undefined) row.two_factor_enabled = account.twoFactorEnabled;
 
-  const { error } = await supabase.from('accounts').upsert(row, { onConflict: 'auth_uid' });
+  const { error } = await withDbTimeout(supabase.from('accounts').upsert(row, { onConflict: 'auth_uid' }), 'putAccount');
   if (error) throw error;
   cacheInvalidate(`account:${account.email}`);
 }
@@ -149,7 +149,7 @@ export async function getSubscription(subscriptionId) {
 }
 
 export async function putSubscription(state) {
-  const { error } = await supabase
+  const { error } = await withDbTimeout(supabase
     .from('subscriptions')
     .upsert({
       subscription_id:    state.subscriptionId,
@@ -164,7 +164,7 @@ export async function putSubscription(state) {
       settings:           { ...(state.settings ?? {}), autoDepartments: state.autoDepartments ?? [] },
       status:             state.status,
       trial_ends_at:      state.trialEndsAt        ?? null,
-    }, { onConflict: 'subscription_id' });
+    }, { onConflict: 'subscription_id' }), 'putSubscription');
   if (error) {
     console.error('[putSubscription] Supabase write failed:', error.message);
     throw error;
@@ -232,7 +232,7 @@ export async function insertPendingRegistration(subscriptionId, form) {
     PENDING_SENSITIVE_FIELDS,
   );
 
-  const { data, error } = await supabase
+  const { data, error } = await withDbTimeout(supabase
     .from('pending_registrations')
     .insert({
       subscription_id: subscriptionId,
@@ -253,7 +253,7 @@ export async function insertPendingRegistration(subscriptionId, form) {
       submitted_at:    new Date().toISOString(),
     })
     .select()
-    .single();
+    .single(), 'insertPendingRegistration');
   if (error) throw error;
   cacheInvalidate(`pending:${subscriptionId}`);
   return data.id;
@@ -266,7 +266,7 @@ export async function updatePendingRegistration(id, form) {
     PENDING_SENSITIVE_FIELDS,
   );
 
-  const { error } = await supabase
+  const { error } = await withDbTimeout(supabase
     .from('pending_registrations')
     .update({
       first_name:    form.firstName,
@@ -284,7 +284,7 @@ export async function updatePendingRegistration(id, form) {
       username:      form.username    ?? null,   // plaintext, derived from email
       password:      encCredentials.password,
     })
-    .eq('id', id);
+    .eq('id', id), 'updatePendingRegistration');
   if (error) throw error;
   // subscriptionId isn't passed in here, so clear every pending-registration
   // cache rather than tracking ids -> subscription ourselves.
@@ -292,10 +292,10 @@ export async function updatePendingRegistration(id, form) {
 }
 
 export async function deletePendingRegistration(id) {
-  const { error } = await supabase
+  const { error } = await withDbTimeout(supabase
     .from('pending_registrations')
     .delete()
-    .eq('id', id);
+    .eq('id', id), 'deletePendingRegistration');
   if (error) throw error;
   cacheInvalidate('pending:');
 }
@@ -325,27 +325,27 @@ export async function getAnnouncements(subscriptionId) {
 }
 
 export async function markAnnouncementRead(id) {
-  const { error } = await supabase
+  const { error } = await withDbTimeout(supabase
     .from('announcements')
     .update({ is_read: true })
-    .eq('id', id);
+    .eq('id', id), 'markAnnouncementRead');
   if (error) throw error;
   // id -> subscriptionId isn't known here, so clear all announcement caches.
   cacheInvalidate('announcements:');
 }
 
 export async function markAllAnnouncementsRead(subscriptionId) {
-  const { error } = await supabase
+  const { error } = await withDbTimeout(supabase
     .from('announcements')
     .update({ is_read: true })
     .eq('subscription_id', subscriptionId)
-    .eq('is_read', false);
+    .eq('is_read', false), 'markAllAnnouncementsRead');
   if (error) throw error;
   cacheInvalidate(`announcements:${subscriptionId}`);
 }
 
 export async function insertAnnouncement(subscriptionId, { title, body, type = 'info' }) {
-  const { data, error } = await supabase
+  const { data, error } = await withDbTimeout(supabase
     .from('announcements')
     .insert({
       subscription_id: subscriptionId,
@@ -356,17 +356,17 @@ export async function insertAnnouncement(subscriptionId, { title, body, type = '
       created_at: new Date().toISOString(),
     })
     .select()
-    .single();
+    .single(), 'insertAnnouncement');
   if (error) throw error;
   cacheInvalidate(`announcements:${subscriptionId}`);
   return data.id;
 }
 
 export async function deleteAnnouncement(id) {
-  const { error } = await supabase
+  const { error } = await withDbTimeout(supabase
     .from('announcements')
     .delete()
-    .eq('id', id);
+    .eq('id', id), 'deleteAnnouncement');
   if (error) throw error;
   cacheInvalidate('announcements:');
 }
@@ -380,17 +380,17 @@ export async function deleteAnnouncement(id) {
 
 export async function createEmployeeAccount({ employeeId, subscriptionId, name, email, username, password }) {
   // 1. Check that the email is not already taken in the accounts table
-  const { data: existingProfile } = await supabase
+  const { data: existingProfile } = await withDbTimeout(supabase
     .from('accounts')
     .select('auth_uid')
     .eq('email', email)
-    .maybeSingle();
+    .maybeSingle(), 'createEmployeeAccount-check');
   if (existingProfile) throw new Error(`An account with email "${email}" already exists.`);
 
   // 2. Create the Supabase Auth user via the isolated no-session client.
   //    Using supabaseNoSession (persistSession:false) ensures this signUp call
   //    NEVER overwrites the currently logged-in admin's session.
-  const { data: authData, error: authError } = await supabaseNoSession.auth.signUp({
+  const { data: authData, error: authError } = await withDbTimeout(supabaseNoSession.auth.signUp({
     email,
     password,
     options: {
@@ -398,7 +398,7 @@ export async function createEmployeeAccount({ employeeId, subscriptionId, name, 
       // Suppress the confirmation email — HR already verified the employee.
       emailRedirectTo: undefined,
     },
-  });
+  }), 'createEmployeeAccount-signUp');
   if (authError) throw new Error(authError.message);
 
   // signUp returns a user even when email confirmation is required.
@@ -416,7 +416,7 @@ export async function createEmployeeAccount({ employeeId, subscriptionId, name, 
   //    After signUp() above, supabaseNoSession is now authenticated as the new
   //    employee (auth.uid() === authUid), so the RLS insert policy passes.
   //    Using the admin client would fail because admin's auth.uid() !== authUid.
-  const { error: profileError } = await supabaseNoSession.from('accounts').insert({
+  const { error: profileError } = await withDbTimeout(supabaseNoSession.from('accounts').insert({
     auth_uid:        authUid,
     email,
     role:            'employee',
@@ -424,7 +424,7 @@ export async function createEmployeeAccount({ employeeId, subscriptionId, name, 
     employee_id:     employeeId,
     subscription_id: subscriptionId,
     username,                   // derived from email local-part
-  });
+  }), 'createEmployeeAccount-insertProfile');
   if (profileError) throw new Error(profileError.message);
 
   cacheInvalidate(`empacct:${employeeId}`);
@@ -432,12 +432,12 @@ export async function createEmployeeAccount({ employeeId, subscriptionId, name, 
 
 export async function updateEmployeeAccount(employeeId, { username, password, name, email }) {
   // Fetch the auth_uid so we can update Auth user metadata / password
-  const { data: profile } = await supabase
+  const { data: profile } = await withDbTimeout(supabase
     .from('accounts')
     .select('auth_uid')
     .eq('employee_id', employeeId)
     .eq('role', 'employee')
-    .maybeSingle();
+    .maybeSingle(), 'updateEmployeeAccount-fetch');
 
   if (!profile?.auth_uid) return; // no Auth account yet — nothing to update
 
@@ -446,10 +446,10 @@ export async function updateEmployeeAccount(employeeId, { username, password, na
   if (password) authUpdates.password = password;
   if (email)    authUpdates.email    = email;
   if (Object.keys(authUpdates).length > 0) {
-    const { error: authError } = await supabase.auth.admin.updateUserById(
+    const { error: authError } = await withDbTimeout(supabase.auth.admin.updateUserById(
       profile.auth_uid,
       authUpdates,
-    );
+    ), 'updateEmployeeAccount-authUpdate');
     if (authError) throw new Error(authError.message);
   }
 
@@ -460,11 +460,11 @@ export async function updateEmployeeAccount(employeeId, { username, password, na
   if (username) profileUpdates.username = username;
 
   if (Object.keys(profileUpdates).length > 0) {
-    const { error: profileError } = await supabase
+    const { error: profileError } = await withDbTimeout(supabase
       .from('accounts')
       .update(profileUpdates)
       .eq('employee_id', employeeId)
-      .eq('role', 'employee');
+      .eq('role', 'employee'), 'updateEmployeeAccount-profileUpdate');
     if (profileError) throw new Error(profileError.message);
   }
 
@@ -504,10 +504,10 @@ export async function getAttendanceRecords(subscriptionId) {
 }
 
 export async function putAttendanceRecords(subscriptionId, records) {
-  const { error } = await supabase
+  const { error } = await withDbTimeout(supabase
     .from('subscriptions')
     .update({ attendance_records: records })
-    .eq('subscription_id', subscriptionId);
+    .eq('subscription_id', subscriptionId), 'putAttendanceRecords');
   if (error) throw error;
   cacheInvalidate(`attendance:${subscriptionId}`);
   // attendance_records is also embedded in the cached subscription object.
@@ -553,10 +553,10 @@ export async function adminUpdateSubscription(subscriptionId, { planId, status }
   if (status) updates.status  = status;
   if (Object.keys(updates).length === 0) return;
 
-  const { error } = await supabase
+  const { error } = await withDbTimeout(supabase
     .from('subscriptions')
     .update(updates)
-    .eq('subscription_id', subscriptionId);
+    .eq('subscription_id', subscriptionId), 'adminUpdateSubscription');
   if (error) throw error;
   cacheInvalidate(`subscription:${subscriptionId}`);
   cacheInvalidate('superadmin:subscriptions');
@@ -564,8 +564,8 @@ export async function adminUpdateSubscription(subscriptionId, { planId, status }
 
 /** Superadmin: permanently delete a subscription/company and its accounts. */
 export async function adminDeleteSubscription(subscriptionId) {
-  await supabase.from('accounts').delete().eq('subscription_id', subscriptionId);
-  const { error } = await supabase.from('subscriptions').delete().eq('subscription_id', subscriptionId);
+  await withDbTimeout(supabase.from('accounts').delete().eq('subscription_id', subscriptionId), 'adminDeleteSubscription-accounts');
+  const { error } = await withDbTimeout(supabase.from('subscriptions').delete().eq('subscription_id', subscriptionId), 'adminDeleteSubscription-subscription');
   if (error) throw error;
   cacheInvalidate(`subscription:${subscriptionId}`);
   cacheInvalidate('superadmin:subscriptions');
@@ -596,7 +596,7 @@ export async function getAllAccounts() {
 
 /** Superadmin: reset/change the password for ANY account on the platform. */
 export async function adminResetPassword(authUid, newPassword) {
-  const { error } = await supabase.auth.admin.updateUserById(authUid, { password: newPassword });
+  const { error } = await withDbTimeout(supabase.auth.admin.updateUserById(authUid, { password: newPassword }), 'adminResetPassword');
   if (error) throw new Error(error.message);
 }
 
@@ -605,7 +605,7 @@ export async function adminUpdateAccountRole(authUid, role) {
   // Demoting away from sub_superadmin (or anything else) clears any granted
   // permissions so a future re-promotion always starts from zero access.
   const updates = role === 'sub_superadmin' ? { role } : { role, permissions: [] };
-  const { error } = await supabase.from('accounts').update(updates).eq('auth_uid', authUid);
+  const { error } = await withDbTimeout(supabase.from('accounts').update(updates).eq('auth_uid', authUid), 'adminUpdateAccountRole');
   if (error) throw error;
   cacheInvalidate('superadmin:accounts');
 }
@@ -616,18 +616,18 @@ export async function adminUpdateAccountRole(authUid, role) {
  * sub_superadmin can never edit its own or anyone else's permissions.
  */
 export async function adminSetSubSuperadminPermissions(authUid, permissions) {
-  const { error } = await supabase
+  const { error } = await withDbTimeout(supabase
     .from('accounts')
     .update({ permissions })
     .eq('auth_uid', authUid)
-    .eq('role', 'sub_superadmin');
+    .eq('role', 'sub_superadmin'), 'adminSetSubSuperadminPermissions');
   if (error) throw error;
   cacheInvalidate('superadmin:accounts');
 }
 
 /** Superadmin: remove an account entirely (does not delete the Auth user). */
 export async function adminDeleteAccount(authUid) {
-  const { error } = await supabase.from('accounts').delete().eq('auth_uid', authUid);
+  const { error } = await withDbTimeout(supabase.from('accounts').delete().eq('auth_uid', authUid), 'adminDeleteAccount');
   if (error) throw error;
   cacheInvalidate('superadmin:accounts');
 }

@@ -67,6 +67,19 @@ export function cacheClear() {
 }
 
 /**
+ * Force-clears any currently in-flight cached() calls without waiting for
+ * their own safety timeout. Used by the polling watchdog (see
+ * supabase.js's forceResetStuckAuthState) to recover from a wedged
+ * lower-level lock: clearing the lock alone doesn't help calls that are
+ * already parked waiting on it — this drops their bookkeeping too, so the
+ * *next* call for each key starts completely fresh instead of still being
+ * handed a promise that's waiting on state that no longer exists.
+ */
+export function cacheForceClearInFlight() {
+  inFlight.clear();
+}
+
+/**
  * Wraps an async function with cache-aside behavior: returns the cached
  * value if present, otherwise calls `fn`, caches the resolved value, and
  * returns it. Concurrent calls for the same key share one in-flight

@@ -183,17 +183,122 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
 // could then queue behind a lock this layer had already stopped waiting on.
 export const AUTH_CALL_TIMEOUT_MS = 30_000;
 
-export function withAuthTimeout(promise, label = 'auth-call') {
+// Generic timeout race, usable for any Supabase call (auth or plain table
+// query alike). Extracted so the same protection can wrap writes (see
+// DB_CALL_TIMEOUT_MS / withDbTimeout below), not just auth calls.
+export function withTimeout(promise, ms, label = 'call') {
   return Promise.race([
     promise,
     new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`${label} timed out`)), AUTH_CALL_TIMEOUT_MS)
+      setTimeout(() => reject(new Error(`${label} timed out`)), ms)
     ),
   ]);
 }
 
-// Note: the previous manual `visibilitychange` → `getSession()` call was
-// removed. supabase-js already listens for tab focus/visibility internally
-// to refresh the session, so the manual call was redundant — and, worse,
-// was the second concurrent caller that could race the SDK's own internal
-// refresh and trigger the deadlock described above.
+export function withAuthTimeout(promise, label = 'auth-call') {
+  return withTimeout(promise, AUTH_CALL_TIMEOUT_MS, label);
+}
+
+// ── Writes had no timeout at all ─────────────────────────────────────────────
+// Every READ in db.js goes through cached(), which races the query against a
+// 32s safety timeout (cache.js) and aborts it on expiry. But every WRITE
+// (putSubscription, insertPendingRegistration, markAnnouncementRead,
+// putAttendanceRecords, etc.) was a bare `await supabase.from(...)` call with
+// no timeout wrapper at all. If the same stall reads are hardened against
+// (session/token resolution stuck inside supabase-js, ahead of
+// fetchWithTimeout's own 15s window, which only covers fetch() itself once
+// it's actually issued) happens during a write, that write's promise never
+// settles — it just hangs forever. The calling page's try/catch never runs,
+// so the "Could not save, please try again" toast never fires: the
+// Save/Update button just spins with no feedback and no error, indistinguishable
+// from the app being broken. This gives every write in db.js the same bounded
+// worst case reads already have, so a stuck save fails fast and visibly
+// instead of hanging silently.
+export const DB_CALL_TIMEOUT_MS = 20_000;
+
+export function withDbTimeout(promise, label = 'db-call') {
+  return withTimeout(promise, DB_CALL_TIMEOUT_MS, label);
+}
+
+// ── Last-resort recovery: force-clear a wedged lock/fetch state ─────────────
+// Every individual layer above (fetchWithTimeout, inProcessLock,
+// withAuthTimeout) is supposed to self-heal within its own bound. But if
+// something outside those bounds still leaves lockChains or inFlightRequests
+// holding a stale entry — e.g. a browser API misbehaving in a way none of the
+// above anticipated — every future Supabase call (reads, login, logout) just
+// queues behind it forever with zero visible network activity, and today the
+// only way out is a full page reload.
+//
+// This is a blunt instrument: it does NOT try to gracefully finish whatever
+// was stuck, it just wipes the bookkeeping so the next call starts clean,
+// exactly like a reload would, but without losing app state. Callers (the
+// pollers below) only reach for this after several consecutive failures —
+// a healthy app should never need it.
+export function forceResetStuckAuthState() {
+  console.warn('[supabase] Forcing reset of internal auth lock / in-flight request state after repeated failures.');
+  lockChains.clear();
+  for (const controller of inFlightRequests.keys()) {
+    try { controller.abort(); } catch { /* already aborted/settled */ }
+  }
+  inFlightRequests.clear();
+}
+
+// ── Force a session check on tab return ─────────────────────────────────────
+// A previous manual `visibilitychange` → `getSession()` call was removed on
+// the theory that supabase-js's own internal focus/visibility handling makes
+// it redundant. In practice it isn't: supabase-js's auto-refresh timer is
+// paused while the tab is hidden and, on resume, reschedules based on a
+// stale "time until expiry" estimate rather than forcing an immediate check.
+// After a long idle period the JWT can already be expired by the time the
+// tab is visible again, and nothing proactively refreshes it — every
+// mutating call (Save, Update, Logout) then goes out with a dead token,
+// fails, and only a full page reload (whose bootstrap explicitly calls
+// getSession()) actually fixes it.
+//
+// This restores that forced check, but safely: getSession() goes through
+// the same inProcessLock as everything else, which now has a hard 12s
+// timeout (LOCK_FN_TIMEOUT_MS) plus withAuthTimeout as a second backstop —
+// so unlike before, a stuck attempt here can no longer wedge the lock for
+// every other caller. `checkingSessionOnResume` dedupes rapid-fire
+// visibility events (e.g. alt-tabbing quickly) so we don't stack up
+// redundant calls.
+// Dispatched when a resume-time session check can't be verified. AuthContext
+// listens for this and forces a clean logout instead of leaving the app in
+// limbo — see the reasoning above checkSessionOnResume for why "just log a
+// warning and carry on" isn't good enough here.
+export const SESSION_UNVERIFIABLE_EVENT = 'supabase:session-unverifiable';
+
+let checkingSessionOnResume = false;
+async function checkSessionOnResume() {
+  if (checkingSessionOnResume) return;
+  checkingSessionOnResume = true;
+  try {
+    await withAuthTimeout(supabase.auth.getSession(), 'resume-getSession');
+  } catch (err) {
+    // This call abandoning itself (via withAuthTimeout/inProcessLock's own
+    // internal races) means the real supabase-js call may still be running
+    // in the background, potentially leaving supabase-js's own internal
+    // client state (refresh-in-progress flags etc. — not ours to clear)
+    // stuck. forceResetStuckAuthState() only clears *our* wrapper's
+    // bookkeeping, not that — so silently retrying here just leaves the
+    // app half-alive (reads keep failing, writes keep failing) with no
+    // path back except a manual reload.
+    //
+    // Instead: treat "can't verify the session" as "the session is no
+    // longer trustworthy" and force a clean, visible logout. This is a much
+    // better outcome for the person than a frozen app — they get a clear
+    // "please sign in again" instead of silently-broken buttons.
+    console.warn('Session check on tab resume failed, forcing logout:', err);
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent(SESSION_UNVERIFIABLE_EVENT));
+    }
+  } finally {
+    checkingSessionOnResume = false;
+  }
+}
+
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') checkSessionOnResume();
+  });
+}

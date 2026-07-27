@@ -20,6 +20,10 @@ const LOGOUT_NOTICES = {
     title: 'Session expired',
     message: "Your session has ended (sessions without \u201CRemember me\u201D reset at midnight; \u201CRemember me\u201D sessions last 24 hours). Please sign in again to continue.",
   },
+  session_unverifiable: {
+    title: 'Please sign in again',
+    message: "We couldn't verify your session after this tab was inactive for a while (e.g. left in the background). Your data is safe — just sign in again to pick up where you left off.",
+  },
 };
 
 const FEATURES = [
@@ -51,6 +55,7 @@ export default function LoginPage() {
   const [showPw,      setShowPw]      = useState(false);
   const [loading,     setLoading]     = useState(false);
   const [error,       setError]       = useState('');
+  const [errorNeedsReload, setErrorNeedsReload] = useState(false);
   const [transitioning, setTransitioning] = useState(false);
   const [subscriptionPromise, setSubscriptionPromise] = useState(null);
   const loggedInRoleRef = useRef(null);
@@ -100,6 +105,7 @@ export default function LoginPage() {
   async function handleSubmit(e) {
     e.preventDefault();
     setError('');
+    setErrorNeedsReload(false);
     setLoading(true);
     try {
       const { user, abac } = await login(email, password, rememberMe);
@@ -124,6 +130,11 @@ export default function LoginPage() {
         return;
       }
       setError(err.message);
+      // See AuthContext's login(): set only once same-tab login timeouts have
+      // repeated enough to point at a wedged browser connection pool rather
+      // than a one-off slow connection — a plain retry can't fix that, only
+      // a reload (which resets the browser's connection pool) can.
+      setErrorNeedsReload(!!err.needsReload);
       setLoading(false);
     }
   }
@@ -273,7 +284,18 @@ export default function LoginPage() {
                 ) : (
                   <AlertTriangle size={15} className="mt-0.5 shrink-0" />
                 )}
-                {error}
+                <div className="flex-1">
+                  {error}
+                  {errorNeedsReload && (
+                    <button
+                      type="button"
+                      onClick={() => window.location.reload()}
+                      className="block mt-2 font-semibold underline underline-offset-2"
+                    >
+                      Reload page
+                    </button>
+                  )}
+                </div>
               </div>
             )}
 

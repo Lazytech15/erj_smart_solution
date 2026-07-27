@@ -1,6 +1,14 @@
 import { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
 import { getSubscription, putSubscription, getAttendanceRecords, putAttendanceRecords, getPendingRegistrations, insertPendingRegistration, updatePendingRegistration, deletePendingRegistration, createEmployeeAccount, updateEmployeeAccount, getEmployeeAccount } from '../utils/db';
+import { forceResetStuckAuthState } from '../utils/supabase';
+import { cacheForceClearInFlight } from '../utils/cache';
 import { useAuth } from './AuthContext';
+
+// Number of consecutive poll failures before assuming the internal auth
+// lock / in-flight request bookkeeping is wedged (rather than the backend
+// being genuinely slow) and forcing a self-heal reset. Kept above 1 so a
+// single blip doesn't trigger a reset unnecessarily.
+const STUCK_STATE_THRESHOLD = 3;
 
 export const PLANS = [
   {
@@ -206,6 +214,16 @@ export function SubscriptionProvider({ children }) {
         // instead of retrying at full speed into a bad connection.
         consecutiveFailures++;
         console.warn('[SubscriptionContext] attendance poll failed:', err?.message || err);
+        // After several consecutive failures with a healthy backend (check
+        // Supabase's own dashboard — if it reports low CPU/connections and
+        // 100% success, the requests are dying before they ever leave the
+        // browser), the most likely cause is a wedged internal lock/in-flight
+        // promise, not real network conditions. Force a reset instead of
+        // requiring a full page reload to recover.
+        if (consecutiveFailures === STUCK_STATE_THRESHOLD) {
+          forceResetStuckAuthState();
+          cacheForceClearInFlight();
+        }
         return;
       }
       consecutiveFailures = 0;
