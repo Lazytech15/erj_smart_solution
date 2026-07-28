@@ -48,6 +48,19 @@ const SESSION_TEMPLATES = {
  *  ids and keeps top-level start/end in sync with the first/last session so
  *  every other part of the app (QR payload, shift chips, status calc) that
  *  reads shift.start/shift.end keeps working without any changes. */
+// A save can fail for reasons entirely outside the app's control — most
+// commonly the device having no internet connection at all, in which case
+// "please refresh and try again" is misleading (refreshing won't help until
+// connectivity is actually back). navigator.onLine is a blunt but real
+// signal for that case; use it to say the accurate thing instead of always
+// blaming a generic save failure.
+function saveErrorMessage(fallback) {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return "You're offline — reconnect to the internet and try again.";
+  }
+  return fallback;
+}
+
 function buildShiftPayload(form) {
   const breaks = (form.breaks || [])
     .filter(b => Number(b.durationMinutes) > 0)
@@ -588,6 +601,15 @@ function ShiftsContent() {
   const [editTarget, setEditTarget] = useState(null);
   const [qrTarget,   setQrTarget]   = useState(null);
   const [form,       setForm]       = useState(EMPTY_FORM);
+  // Neither handleAdd nor handleEdit disabled their button while the
+  // underlying save was in flight, so a slow save (e.g. right after the tab
+  // was backgrounded, waiting on withDbTimeout/DB_CALL_TIMEOUT_MS) gave zero
+  // visual feedback — a person clicking "Save Changes" a few times during
+  // that wait fired that many duplicate updateShift() calls, all racing each
+  // other. This flag disables the button and shows a spinner/label the
+  // instant the first click lands, so it's obvious the click registered and
+  // further clicks are ignored until the request actually settles.
+  const [isSaving, setIsSaving] = useState(false);
 
   function empCount(shiftId) {
     return employees.filter(e => e.shiftId && String(e.shiftId) === String(shiftId)).length;
@@ -611,15 +633,19 @@ function ShiftsContent() {
   }
 
   async function handleAdd() {
-    if (!form.name.trim()) return;
+    if (!form.name.trim() || isSaving) return;
     const payload = buildShiftPayload(form);
     // addShift sets id = Date.now() internally; capture the same timestamp
     const newShiftId = Date.now();
+    setIsSaving(true);
     try {
       await addShift({ ...payload, id: newShiftId, color: SHIFT_COLORS[shifts.length % SHIFT_COLORS.length] });
     } catch (err) {
-      toast('Could not save the new shift — please refresh the page and try again.', 'error');
+      console.error('[ShiftsPage] addShift failed:', err);
+      toast(saveErrorMessage('Could not save the new shift — please refresh the page and try again.'), 'error');
       return; // keep the modal open with the form intact so nothing is lost
+    } finally {
+      setIsSaving(false);
     }
     // Bulk-reassign employees in the selected departments to this new shift.
     // Use a tiny delay so the shift is committed to state before employee updates run.
@@ -637,8 +663,9 @@ function ShiftsContent() {
   }
 
   async function handleEdit() {
-    if (!form.name.trim()) return;
+    if (!form.name.trim() || isSaving) return;
     const payload = buildShiftPayload(form);
+    setIsSaving(true);
     try {
       await updateShift(editTarget.id, {
         name: form.name,
@@ -652,8 +679,11 @@ function ShiftsContent() {
         departments: form.departments || [],
       });
     } catch (err) {
-      toast('Could not save your changes — please refresh the page and try again.', 'error');
+      console.error('[ShiftsPage] updateShift failed:', err);
+      toast(saveErrorMessage('Could not save your changes — please refresh the page and try again.'), 'error');
       return; // leave the modal open, form untouched, nothing falsely marked "saved"
+    } finally {
+      setIsSaving(false);
     }
     // Bulk-reassign employees in the selected departments to this shift
     if (form.departments?.length) {
@@ -682,8 +712,8 @@ function ShiftsContent() {
 
   const modalFooter = (onPrimary, label) => (
     <>
-      <button className="btn-secondary" onClick={() => { setAddModal(false); setEditTarget(null); }}>Cancel</button>
-      <button className="btn-primary" onClick={onPrimary}>{label}</button>
+      <button className="btn-secondary" onClick={() => { setAddModal(false); setEditTarget(null); }} disabled={isSaving}>Cancel</button>
+      <button className="btn-primary" onClick={onPrimary} disabled={isSaving}>{isSaving ? 'Saving…' : label}</button>
     </>
   );
 

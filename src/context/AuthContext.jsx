@@ -1,6 +1,6 @@
 import { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
-import { supabase, withAuthTimeout, SESSION_UNVERIFIABLE_EVENT } from '../utils/supabase';
-import { cacheClear } from '../utils/cache';
+import { supabase, withAuthTimeout, SESSION_UNVERIFIABLE_EVENT, forceResetStuckAuthState } from '../utils/supabase';
+import { cacheClear, cacheForceClearInFlight } from '../utils/cache';
 import {
   evaluateABACPolicy,
   recordLoginAttempt,
@@ -503,6 +503,23 @@ export function AuthProvider({ children }) {
       clearSessionPolicy();
       cacheClear();
 
+      // A logout triggered by 'session_unverifiable' means checkSessionOnResume
+      // already gave up waiting on the auth lock/fetch layer — i.e. we KNOW
+      // something is wedged, that's the whole reason we're here. Previously
+      // this only got cleared reactively, after enough *separate* things
+      // (e.g. the attendance poller) independently hit their own failure
+      // threshold — which meant a person who force-logged-out could
+      // immediately retype their password into the very same jammed
+      // connection pool and watch it queue behind the same stuck sockets
+      // for another 30s before failing again. Since we already have proof
+      // of a wedge right here, reset it now instead of waiting for something
+      // else to notice — this gives the very next login attempt in this tab
+      // a clean shot instead of an avoidable second timeout.
+      if (reason === 'session_unverifiable') {
+        forceResetStuckAuthState();
+        cacheForceClearInFlight();
+      }
+
       // Defense-in-depth: supabase-js normally strips its own auth token from
       // localStorage as part of signOut(), but if signOut() threw before it
       // got that far, don't leave a stale JWT sitting around.
@@ -517,19 +534,23 @@ export function AuthProvider({ children }) {
   }, []);
 
   // ── React to unverifiable sessions (see supabase.js's checkSessionOnResume) ─
-  // If a resume-time session check times out, the app can no longer trust
-  // that the current session is real — rather than leaving reads/writes
-  // failing silently forever (requiring a manual reload to recover), force
-  // a clean, visible logout so the person gets a clear "please sign in
-  // again" instead of a frozen page. Only acts while actually signed in —
-  // no-op on the login page itself.
+  // If a resume-time session check times out, that's a *connectivity* problem
+  // (a wedged fetch/lock, a flaky connection after the tab was backgrounded) —
+  // not proof the session itself is invalid. Signing the person out on every
+  // such timeout is unnecessarily destructive: it discards whatever they were
+  // doing and makes them log back in even though their credentials were never
+  // actually the problem. Instead, surface a non-destructive "connection
+  // issue, please reload" prompt and let a full page reload (which re-runs
+  // the normal getSession() bootstrap) recover things. Only acts while
+  // actually signed in — no-op on the login page itself.
+  const [connectionIssue, setConnectionIssue] = useState(false);
   useEffect(() => {
     function handleUnverifiable() {
-      if (user) logout('session_unverifiable');
+      if (user) setConnectionIssue(true);
     }
     window.addEventListener(SESSION_UNVERIFIABLE_EVENT, handleUnverifiable);
     return () => window.removeEventListener(SESSION_UNVERIFIABLE_EVENT, handleUnverifiable);
-  }, [user, logout]);
+  }, [user]);
 
   // ── Session policy enforcement while the app stays open ────────────────────
   // Both checks below run off the SAME 30s poll, driven by real wall-clock
@@ -614,7 +635,7 @@ export function AuthProvider({ children }) {
   const can = useCallback((permission) => abacCan(user, permission), [user]);
 
   return (
-    <AuthContext.Provider value={{ user, authReady, login, verifyMfaAndLogin, commitLogin, logout, can, registerCompanyAdmin, refreshProfile }}>
+    <AuthContext.Provider value={{ user, authReady, login, verifyMfaAndLogin, commitLogin, logout, can, registerCompanyAdmin, refreshProfile, connectionIssue }}>
       {children}
     </AuthContext.Provider>
   );

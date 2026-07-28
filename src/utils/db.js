@@ -1,4 +1,4 @@
-import { supabase, fetchWithTimeout, withDbTimeout } from './supabase';
+import { supabase, fetchWithTimeout, withDbTimeout, withRetryOnTimeout } from './supabase';
 import { createClient } from '@supabase/supabase-js';
 import { encryptField, decryptField, encryptFields, decryptFields } from './crypto';
 import { cached, cacheInvalidate } from './cache';
@@ -149,22 +149,33 @@ export async function getSubscription(subscriptionId) {
 }
 
 export async function putSubscription(state) {
-  const { error } = await withDbTimeout(supabase
-    .from('subscriptions')
-    .upsert({
-      subscription_id:    state.subscriptionId,
-      plan_id:            state.planId,
-      company:            state.company,
-      billing:            state.billing,
-      enrolled_employees: state.enrolledEmployees ?? [],
-      departments:        state.departments        ?? [],
-      shifts:             state.shifts             ?? [],
-      attendance_records: state.attendanceRecords  ?? [],
-      leave_requests:     state.leaveRequests      ?? [],
-      settings:           { ...(state.settings ?? {}), autoDepartments: state.autoDepartments ?? [] },
-      status:             state.status,
-      trial_ends_at:      state.trialEndsAt        ?? null,
-    }, { onConflict: 'subscription_id' }), 'putSubscription');
+  let error;
+  try {
+    ({ error } = await withRetryOnTimeout(() => supabase
+      .from('subscriptions')
+      .upsert({
+        subscription_id:    state.subscriptionId,
+        plan_id:            state.planId,
+        company:            state.company,
+        billing:            state.billing,
+        enrolled_employees: state.enrolledEmployees ?? [],
+        departments:        state.departments        ?? [],
+        shifts:             state.shifts             ?? [],
+        attendance_records: state.attendanceRecords  ?? [],
+        leave_requests:     state.leaveRequests      ?? [],
+        settings:           { ...(state.settings ?? {}), autoDepartments: state.autoDepartments ?? [] },
+        status:             state.status,
+        trial_ends_at:      state.trialEndsAt        ?? null,
+      }, { onConflict: 'subscription_id' }), 'putSubscription'));
+  } catch (timeoutErr) {
+    // A bare timeout/abort Error from withDbTimeout (not a Supabase
+    // {error} object) used to skip the check below entirely and propagate
+    // up to the caller completely unlogged — the only feedback anywhere
+    // was a generic "could not save" toast with zero detail. Log it here
+    // so it's actually visible in the console instead of vanishing.
+    console.error('[putSubscription] write failed after retries:', timeoutErr?.message || timeoutErr);
+    throw timeoutErr;
+  }
   if (error) {
     console.error('[putSubscription] Supabase write failed:', error.message);
     throw error;

@@ -440,16 +440,42 @@ function DashboardOverview({ employees, attendanceRecords, todayRecs, leaveReque
 
   const chartData = viewMode === 'year' ? yearTrend : monthTrend;
 
-  // On-time vs late split — computed separately for month and year so both pies can render together
-  const toPieData = (rows) => {
+  // On-time vs late split — always the *real* current month and current year,
+  // regardless of the ‹ › navigation above (which only moves the bar chart).
+  // Computed from full, untruncated date ranges — monthTrend/yearTrend above
+  // aren't reused here because monthTrend is .slice(-10)'d for chart display,
+  // which would otherwise undercount the month to its last 10 days.
+  const toPieData = (rows, colors) => {
     const totals = rows.reduce((acc, d) => ({ onTime: acc.onTime + d.onTime, late: acc.late + d.late }), { onTime: 0, late: 0 });
     return [
-      { name: 'On-time', value: totals.onTime, color: '#4f6ef7' },
-      { name: 'Late',     value: totals.late,   color: '#fbbf24' },
+      { name: 'On-time', value: totals.onTime, color: colors.onTime },
+      { name: 'Late',     value: totals.late,   color: colors.late },
     ].filter(d => d.value > 0);
   };
-  const monthPieData = useMemo(() => toPieData(monthTrend), [monthTrend]);
-  const yearPieData  = useMemo(() => toPieData(yearTrend),  [yearTrend]);
+
+  const currentMonthTrend = useMemo(() => {
+    const now   = new Date();
+    const start = startOfMonth(now);
+    const end   = endOfMonth(now);
+    const days  = eachDayOfInterval({ start, end }).filter(d => d <= now);
+    return days.map(d => {
+      const dateStr = format(d, 'yyyy-MM-dd');
+      const recs    = attendanceRecords.filter(r => r.date === dateStr);
+      return { onTime: recs.filter(r => r.status === 'present').length, late: recs.filter(r => r.status === 'late').length };
+    });
+  }, [attendanceRecords]);
+
+  const currentYearTrend = useMemo(() => {
+    const year = new Date().getFullYear();
+    return Array.from({ length: 12 }, (_, i) => {
+      const recs = attendanceRecords.filter(r => r.date?.startsWith(`${year}-${String(i + 1).padStart(2, '0')}`));
+      return { onTime: recs.filter(r => r.status === 'present').length, late: recs.filter(r => r.status === 'late').length };
+    });
+  }, [attendanceRecords]);
+
+  // Monthly = blue tones, Yearly = purple tones, so the combined donut is easy to tell apart
+  const monthPieData = useMemo(() => toPieData(currentMonthTrend, { onTime: '#4f6ef7', late: '#c7d2fe' }), [currentMonthTrend]);
+  const yearPieData  = useMemo(() => toPieData(currentYearTrend,  { onTime: '#7c3aed', late: '#e9d5ff' }), [currentYearTrend]);
 
   // Per-department breakdown (based on today's attendance)
   const deptStats = useMemo(() => {
@@ -544,44 +570,55 @@ function DashboardOverview({ employees, attendanceRecords, todayRecs, leaveReque
               </BarChart>
             </ResponsiveContainer>
 
-            {/* On-time vs late split — Monthly and Yearly stacked vertically */}
-            <div className="mt-2 pt-3 border-t border-surface-100 space-y-4">
-              {[
-                { label: 'Monthly Split', data: monthPieData },
-                { label: 'Yearly Split',  data: yearPieData  },
-              ].map(({ label, data }) => (
-                <div key={label} className="flex items-center gap-4">
-                  {data.length === 0 ? (
-                    <p className="text-xs text-ink-300 py-3 w-full text-center">No {label.toLowerCase()} records yet.</p>
-                  ) : (
-                    <>
-                      <ResponsiveContainer width={90} height={90}>
-                        <PieChart>
-                          <Pie data={data} dataKey="value" nameKey="name" innerRadius={25} outerRadius={42} paddingAngle={2}>
-                            {data.map((d, i) => <Cell key={i} fill={d.color} />)}
-                          </Pie>
-                          <Tooltip contentStyle={{ fontSize: 11, borderRadius: 8 }} />
-                        </PieChart>
-                      </ResponsiveContainer>
-                      <div className="flex-1 space-y-2">
-                        <p className="text-[10px] font-semibold text-ink-400 uppercase tracking-wide">{label}</p>
-                        {data.map(d => {
-                          const total = data.reduce((s, x) => s + x.value, 0);
-                          const pct   = total > 0 ? Math.round((d.value / total) * 100) : 0;
-                          return (
-                            <div key={d.name} className="flex items-center gap-2 text-xs">
-                              <span className="w-2 h-2 rounded-full shrink-0" style={{ background: d.color }} />
-                              <span className="text-ink-600 flex-1">{d.name}</span>
-                              <span className="font-semibold text-ink-800">{d.value}</span>
-                              <span className="text-ink-300 w-8 text-right">{pct}%</span>
-                            </div>
-                          );
-                        })}
+            {/* On-time vs late split — Monthly (inner ring) and Yearly (outer ring) combined */}
+            <div className="mt-2 pt-3 border-t border-surface-100">
+              {monthPieData.length === 0 && yearPieData.length === 0 ? (
+                <p className="text-xs text-ink-300 py-3 w-full text-center">No split records yet.</p>
+              ) : (
+                <div className="flex items-center gap-4">
+                  <PieChart width={90} height={90}>
+                    {monthPieData.length > 0 && (
+                      <Pie data={monthPieData} dataKey="value" nameKey="name" innerRadius={18} outerRadius={32} paddingAngle={2} stroke="none">
+                        {monthPieData.map((d, i) => <Cell key={i} fill={d.color} />)}
+                      </Pie>
+                    )}
+                    {yearPieData.length > 0 && (
+                      <Pie data={yearPieData} dataKey="value" nameKey="name" innerRadius={36} outerRadius={44} paddingAngle={2} stroke="none">
+                        {yearPieData.map((d, i) => <Cell key={i} fill={d.color} />)}
+                      </Pie>
+                    )}
+                    <Tooltip contentStyle={{ fontSize: 11, borderRadius: 8 }} />
+                  </PieChart>
+                  <div className="flex-1 space-y-3">
+                    {[
+                      { label: `Monthly Split · ${format(new Date(), 'MMM yyyy')}`, data: monthPieData },
+                      { label: `Yearly Split · ${format(new Date(), 'yyyy')}`,      data: yearPieData  },
+                    ].map(({ label, data }) => (
+                      <div key={label}>
+                        <p className="text-[10px] font-semibold text-ink-400 uppercase tracking-wide mb-1">{label}</p>
+                        {data.length === 0 ? (
+                          <p className="text-[11px] text-ink-300">No {label.toLowerCase()} records yet.</p>
+                        ) : (
+                          <div className="space-y-1">
+                            {data.map(d => {
+                              const total = data.reduce((s, x) => s + x.value, 0);
+                              const pct   = total > 0 ? Math.round((d.value / total) * 100) : 0;
+                              return (
+                                <div key={d.name} className="flex items-center gap-2 text-xs">
+                                  <span className="w-2 h-2 rounded-full shrink-0" style={{ background: d.color }} />
+                                  <span className="text-ink-600 flex-1">{d.name}</span>
+                                  <span className="font-semibold text-ink-800">{d.value}</span>
+                                  <span className="text-ink-300 w-8 text-right">{pct}%</span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
                       </div>
-                    </>
-                  )}
+                    ))}
+                  </div>
                 </div>
-              ))}
+              )}
             </div>
           </>
         )}

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import ConnectionIssueModal from './components/ConnectionIssueModal';
 import { SubscriptionProvider, useSubscription } from './context/SubscriptionContext';
 import { ToastProvider } from './context/ToastContext';
 import { NotificationsProvider } from './context/NotificationsContext';
@@ -181,6 +182,7 @@ export default function App() {
             <FirstLoadGate>
               <AppRoutes />
             </FirstLoadGate>
+            <ConnectionIssueModal />
           </ToastProvider>
           </NotificationsProvider>
         </SubscriptionProvider>

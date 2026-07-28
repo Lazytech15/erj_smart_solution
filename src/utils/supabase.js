@@ -220,6 +220,34 @@ export function withDbTimeout(promise, label = 'db-call') {
   return withTimeout(promise, DB_CALL_TIMEOUT_MS, label);
 }
 
+// ── Retry helper for idempotent writes ──────────────────────────────────────
+// withDbTimeout above turns a stalled write into a fast, visible rejection —
+// but a fast rejection on the FIRST attempt during the same kind of transient
+// network blip that checkSessionOnResume now retries through (stale
+// connection after real tab inactivity — see the comment above that
+// function) still means the save just fails once and gives up, dumping the
+// person back to "could not save, please try again" with no automatic
+// recovery. For writes that are safe to retry (a plain upsert of the full
+// current state, like putSubscription — re-sending it if the first attempt's
+// response was merely lost in transit doesn't corrupt anything), retry with
+// a short backoff before surfacing a real failure.
+// `queryFn` must be a factory (() => promise), not a promise, since retrying
+// means re-issuing the Supabase call, not re-awaiting an already-settled one.
+const WRITE_RETRY_DELAYS_MS = [1_500, 4_000];
+
+export async function withRetryOnTimeout(queryFn, label = 'db-write') {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await withDbTimeout(queryFn(), label);
+    } catch (err) {
+      const knownOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
+      if (knownOffline || attempt >= WRITE_RETRY_DELAYS_MS.length) throw err;
+      console.warn(`[${label}] attempt ${attempt + 1} failed, retrying:`, err?.message || err);
+      await new Promise((resolve) => setTimeout(resolve, WRITE_RETRY_DELAYS_MS[attempt]));
+    }
+  }
+}
+
 // ── Last-resort recovery: force-clear a wedged lock/fetch state ─────────────
 // Every individual layer above (fetchWithTimeout, inProcessLock,
 // withAuthTimeout) is supposed to self-heal within its own bound. But if
@@ -268,37 +296,97 @@ export function forceResetStuckAuthState() {
 // warning and carry on" isn't good enough here.
 export const SESSION_UNVERIFIABLE_EVENT = 'supabase:session-unverifiable';
 
+// After the tab sits inactive for real minutes, the *underlying network
+// connection* — not our own lock/fetch bookkeeping — can go stale (router
+// NAT table entry expired, Wi-Fi power-saving drop, VPN needing to
+// re-handshake, etc.). The browser looks "connected" but the very first
+// request has to wait for that dead path to actually be detected and a new
+// one negotiated, which routinely takes 10-30+ seconds — longer than a
+// single quick retry gives it. So: keep retrying with backoff over a real
+// window instead of giving up after one extra attempt, AND listen for the
+// browser's own `online` event to retry immediately the moment connectivity
+// is confirmed back, rather than guessing when it's safe to try again.
+const RESUME_RETRY_DELAYS_MS = [3_000, 6_000, 12_000, 20_000]; // ~41s total window
+const RESUME_RETRY_TIMEOUT_MS = 10_000;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Lets the `online` event below cut a backoff delay short instead of being
+// swallowed by the in-progress guard (checkSessionOnResume no-ops while a
+// check is already running, so re-calling it from the online handler alone
+// would do nothing while a wait is in progress).
+let wakeResolve = null;
+function waitOrWake(ms) {
+  return Promise.race([
+    sleep(ms),
+    new Promise((resolve) => { wakeResolve = resolve; }),
+  ]);
+}
+function wake() {
+  if (wakeResolve) { wakeResolve(); wakeResolve = null; }
+}
+
 let checkingSessionOnResume = false;
+let resumeCheckGeneration = 0;
 async function checkSessionOnResume() {
   if (checkingSessionOnResume) return;
   checkingSessionOnResume = true;
+  // Bump a generation counter so that if the browser's `online` event fires
+  // and starts a fresh check while this one is still mid-backoff, the old
+  // one's remaining retries become no-ops instead of racing/duplicating work.
+  const myGeneration = ++resumeCheckGeneration;
   try {
     await withAuthTimeout(supabase.auth.getSession(), 'resume-getSession');
-  } catch (err) {
-    // This call abandoning itself (via withAuthTimeout/inProcessLock's own
-    // internal races) means the real supabase-js call may still be running
-    // in the background, potentially leaving supabase-js's own internal
-    // client state (refresh-in-progress flags etc. — not ours to clear)
-    // stuck. forceResetStuckAuthState() only clears *our* wrapper's
-    // bookkeeping, not that — so silently retrying here just leaves the
-    // app half-alive (reads keep failing, writes keep failing) with no
-    // path back except a manual reload.
-    //
-    // Instead: treat "can't verify the session" as "the session is no
-    // longer trustworthy" and force a clean, visible logout. This is a much
-    // better outcome for the person than a frozen app — they get a clear
-    // "please sign in again" instead of silently-broken buttons.
-    console.warn('Session check on tab resume failed, forcing logout:', err);
+    checkingSessionOnResume = false;
+    return; // session verified — done.
+  } catch (firstErr) {
+    console.warn('Session check on tab resume failed, will retry with backoff:', firstErr);
+    forceResetStuckAuthState();
+  }
+
+  for (const delay of RESUME_RETRY_DELAYS_MS) {
+    await waitOrWake(delay);
+    if (myGeneration !== resumeCheckGeneration) return; // superseded by a newer check
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) continue; // no point trying yet
+    try {
+      await withTimeout(supabase.auth.getSession(), RESUME_RETRY_TIMEOUT_MS, 'resume-getSession-retry');
+      checkingSessionOnResume = false;
+      return; // recovered — session is fine, nothing further to do.
+    } catch (retryErr) {
+      console.warn('Session check on tab resume retry failed:', retryErr);
+    }
+  }
+
+  if (myGeneration === resumeCheckGeneration) {
+    // Exhausted the whole retry window (~41s of real elapsed time) with no
+    // success. At this point it's no longer reasonable to assume "the
+    // network just needs a moment" — surface the recovery prompt instead of
+    // retrying forever with no feedback.
+    console.warn('Session check on tab resume failed across the full retry window, forcing logout.');
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent(SESSION_UNVERIFIABLE_EVENT));
     }
-  } finally {
-    checkingSessionOnResume = false;
   }
+  checkingSessionOnResume = false;
 }
 
 if (typeof document !== 'undefined') {
   document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') checkSessionOnResume();
+  });
+}
+
+if (typeof window !== 'undefined') {
+  // The visibilitychange check above fires the moment you switch back to
+  // the tab, which can be *before* the underlying network has actually
+  // recovered from the idle-drop described above. The `online` event fires
+  // when the browser itself confirms connectivity is back, so use it to
+  // short-circuit the backoff loop and retry right away instead of waiting
+  // for the next scheduled delay.
+  window.addEventListener('online', () => {
+    wake();
     if (document.visibilityState === 'visible') checkSessionOnResume();
   });
 }
