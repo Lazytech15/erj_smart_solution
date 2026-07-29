@@ -58,19 +58,60 @@ if (typeof document !== 'undefined') {
   setInterval(sweepOverdueRequests, 10_000);
 }
 
+// Browsers cap concurrent connections to a single host (historically 6 for
+// HTTP/1.1). Every timeout/retry mechanism in this file gives up on the JS
+// side after its own budget, but the *browser* doesn't necessarily close the
+// underlying socket that quickly. Pile up enough concurrent requests — write
+// retries, session-resume retries, and the recurring notification/attendance
+// pollers all firing within the same window — and the connection slots get
+// fully occupied by requests that are each individually "fine" but
+// collectively exceed the cap. Every *new* request, including totally
+// unrelated ones like clicking Save or a plain getSession() check, then
+// queues invisibly waiting for a free slot — with no network error and often
+// no visible activity — which reproduces exactly the "everything times out
+// together even though the internet is fine, only a reload fixes it" symptom.
+// A small in-JS queue keeps at most MAX_CONCURRENT_REQUESTS actually in
+// flight at once; anything beyond that waits its turn here instead of
+// occupying (and starving) a real browser connection.
+const MAX_CONCURRENT_REQUESTS = 4;
+let activeRequestCount = 0;
+const requestQueue = [];
+
+function runNext() {
+  if (activeRequestCount >= MAX_CONCURRENT_REQUESTS || requestQueue.length === 0) return;
+  activeRequestCount++;
+  const { resolve } = requestQueue.shift();
+  resolve();
+}
+
+function acquireSlot() {
+  return new Promise((resolve) => {
+    requestQueue.push({ resolve });
+    runNext();
+  });
+}
+
+function releaseSlot() {
+  activeRequestCount--;
+  runNext();
+}
+
 export function fetchWithTimeout(url, options = {}) {
-  const controller = new AbortController();
-  const deadline = Date.now() + FETCH_TIMEOUT_MS;
-  inFlightRequests.set(controller, deadline);
-  const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  return acquireSlot().then(() => {
+    const controller = new AbortController();
+    const deadline = Date.now() + FETCH_TIMEOUT_MS;
+    inFlightRequests.set(controller, deadline);
+    const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 
-  const signal = options.signal
-    ? anySignal([options.signal, controller.signal])
-    : controller.signal;
+    const signal = options.signal
+      ? anySignal([options.signal, controller.signal])
+      : controller.signal;
 
-  return fetch(url, { ...options, signal }).finally(() => {
-    clearTimeout(timeoutId);
-    inFlightRequests.delete(controller);
+    return fetch(url, { ...options, signal }).finally(() => {
+      clearTimeout(timeoutId);
+      inFlightRequests.delete(controller);
+      releaseSlot();
+    });
   });
 }
 
@@ -143,7 +184,7 @@ async function inProcessLock(name, acquireTimeout, fn) {
   // pattern. Racing fn() itself against a timeout guarantees release()
   // always runs on schedule, regardless of what the real operation ends up
   // doing later (it's simply on its own once we stop waiting on it here).
-  const LOCK_FN_TIMEOUT_MS = 12_000;
+  const LOCK_FN_TIMEOUT_MS = 6_000;
 
   try {
     return await Promise.race([
@@ -173,15 +214,16 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
 // lock resolution, before fetch() is ever called. Wrap those calls so a
 // stuck internal state still fails fast instead of hanging the UI forever.
 // Must stay longer than the worst-case time the layers underneath can
-// legitimately take: the auth lock (LOCK_FN_TIMEOUT_MS, 12s) plus a single
+// legitimately take: the auth lock (LOCK_FN_TIMEOUT_MS, 6s) plus a single
 // fetch (FETCH_TIMEOUT_MS, 15s) run sequentially inside a call like
-// signOut() — up to ~27s worst case. This was previously 10s, shorter than
-// that chain, which meant withAuthTimeout was giving up and letting the UI
-// move on (e.g. clearing local session on logout) while the real signOut()
-// call — and the lock it was holding — was still legitimately running for
-// several more seconds. The very next auth call (e.g. signing back in)
-// could then queue behind a lock this layer had already stopped waiting on.
-export const AUTH_CALL_TIMEOUT_MS = 30_000;
+// signOut() — up to ~21s worst case, with a little headroom. (This used to
+// assume a 12s lock timeout — 27s worst case, rounded up to a 30s budget.
+// After shortening LOCK_FN_TIMEOUT_MS to 6s, keeping this at 30s just meant
+// logout could sit waiting for up to 9 extra seconds it no longer needs, on
+// top of everything that already made this slow.) Keeping it shorter than
+// this bound risks giving up on a legitimately-still-running signOut() while
+// its lock is still held — see the note above for why that's worse.
+export const AUTH_CALL_TIMEOUT_MS = 22_000;
 
 // Generic timeout race, usable for any Supabase call (auth or plain table
 // query alike). Extracted so the same protection can wrap writes (see
@@ -233,7 +275,7 @@ export function withDbTimeout(promise, label = 'db-call') {
 // a short backoff before surfacing a real failure.
 // `queryFn` must be a factory (() => promise), not a promise, since retrying
 // means re-issuing the Supabase call, not re-awaiting an already-settled one.
-const WRITE_RETRY_DELAYS_MS = [1_500, 4_000];
+const WRITE_RETRY_DELAYS_MS = [8_000];
 
 export async function withRetryOnTimeout(queryFn, label = 'db-write') {
   for (let attempt = 0; ; attempt++) {
@@ -306,70 +348,49 @@ export const SESSION_UNVERIFIABLE_EVENT = 'supabase:session-unverifiable';
 // window instead of giving up after one extra attempt, AND listen for the
 // browser's own `online` event to retry immediately the moment connectivity
 // is confirmed back, rather than guessing when it's safe to try again.
-const RESUME_RETRY_DELAYS_MS = [3_000, 6_000, 12_000, 20_000]; // ~41s total window
+// A single retry, not a growing backoff loop: each retry is another entry
+// into the SAME shared lock queue (see inProcessLock above — every
+// authenticated call, not just this one, funnels through one lock keyed by
+// a fixed name). Repeatedly retrying doesn't skip that congestion, it adds
+// to it — under real contention the retries can pile up faster than the
+// queue drains, turning a recoverable delay into a pileup that blows past
+// every higher-level timeout. One retry, after a real pause to let whatever
+// is currently ahead in the queue clear, is more likely to succeed than four
+// retries that all compete for the same spot.
+const RESUME_RETRY_DELAY_MS = 8_000;
 const RESUME_RETRY_TIMEOUT_MS = 10_000;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Lets the `online` event below cut a backoff delay short instead of being
-// swallowed by the in-progress guard (checkSessionOnResume no-ops while a
-// check is already running, so re-calling it from the online handler alone
-// would do nothing while a wait is in progress).
-let wakeResolve = null;
-function waitOrWake(ms) {
-  return Promise.race([
-    sleep(ms),
-    new Promise((resolve) => { wakeResolve = resolve; }),
-  ]);
-}
-function wake() {
-  if (wakeResolve) { wakeResolve(); wakeResolve = null; }
-}
-
 let checkingSessionOnResume = false;
-let resumeCheckGeneration = 0;
 async function checkSessionOnResume() {
   if (checkingSessionOnResume) return;
   checkingSessionOnResume = true;
-  // Bump a generation counter so that if the browser's `online` event fires
-  // and starts a fresh check while this one is still mid-backoff, the old
-  // one's remaining retries become no-ops instead of racing/duplicating work.
-  const myGeneration = ++resumeCheckGeneration;
   try {
     await withAuthTimeout(supabase.auth.getSession(), 'resume-getSession');
-    checkingSessionOnResume = false;
     return; // session verified — done.
   } catch (firstErr) {
-    console.warn('Session check on tab resume failed, will retry with backoff:', firstErr);
+    console.warn('Session check on tab resume failed, will retry once:', firstErr);
     forceResetStuckAuthState();
   }
 
-  for (const delay of RESUME_RETRY_DELAYS_MS) {
-    await waitOrWake(delay);
-    if (myGeneration !== resumeCheckGeneration) return; // superseded by a newer check
-    if (typeof navigator !== 'undefined' && navigator.onLine === false) continue; // no point trying yet
-    try {
-      await withTimeout(supabase.auth.getSession(), RESUME_RETRY_TIMEOUT_MS, 'resume-getSession-retry');
-      checkingSessionOnResume = false;
-      return; // recovered — session is fine, nothing further to do.
-    } catch (retryErr) {
-      console.warn('Session check on tab resume retry failed:', retryErr);
-    }
-  }
-
-  if (myGeneration === resumeCheckGeneration) {
-    // Exhausted the whole retry window (~41s of real elapsed time) with no
-    // success. At this point it's no longer reasonable to assume "the
-    // network just needs a moment" — surface the recovery prompt instead of
-    // retrying forever with no feedback.
-    console.warn('Session check on tab resume failed across the full retry window, forcing logout.');
+  await sleep(RESUME_RETRY_DELAY_MS);
+  try {
+    await withTimeout(supabase.auth.getSession(), RESUME_RETRY_TIMEOUT_MS, 'resume-getSession-retry');
+    return; // recovered — session is fine, nothing further to do.
+  } catch (retryErr) {
+    // One retry failed too. Don't keep re-entering the shared lock queue —
+    // surface the recovery prompt instead of retrying forever with no
+    // feedback while adding more contention.
+    console.warn('Session check on tab resume retry failed, forcing logout:', retryErr);
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent(SESSION_UNVERIFIABLE_EVENT));
     }
+  } finally {
+    checkingSessionOnResume = false;
   }
-  checkingSessionOnResume = false;
 }
 
 if (typeof document !== 'undefined') {
@@ -380,13 +401,10 @@ if (typeof document !== 'undefined') {
 
 if (typeof window !== 'undefined') {
   // The visibilitychange check above fires the moment you switch back to
-  // the tab, which can be *before* the underlying network has actually
-  // recovered from the idle-drop described above. The `online` event fires
-  // when the browser itself confirms connectivity is back, so use it to
-  // short-circuit the backoff loop and retry right away instead of waiting
-  // for the next scheduled delay.
+  // the tab, which can be before the underlying network has actually
+  // recovered from an idle-drop. The `online` event fires when the browser
+  // itself confirms connectivity is back, so also trigger a check then.
   window.addEventListener('online', () => {
-    wake();
     if (document.visibilityState === 'visible') checkSessionOnResume();
   });
 }

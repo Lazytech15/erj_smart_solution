@@ -74,9 +74,12 @@ export function NotificationsProvider({ children }) {
 
     let cancelled = false;
     let consecutiveFailures = 0;
+    let ticking = false;
 
     async function tick() {
       if (document.visibilityState !== 'visible') return; // don't poll while backgrounded
+      if (ticking) return; // a tick is already in flight — don't stack another
+      ticking = true;
       try {
         const [notifs, pending] = await Promise.all([
           getAnnouncements(subscriptionId),
@@ -100,6 +103,8 @@ export function NotificationsProvider({ children }) {
           forceResetStuckAuthState();
           cacheForceClearInFlight();
         }
+      } finally {
+        ticking = false;
       }
     }
 
