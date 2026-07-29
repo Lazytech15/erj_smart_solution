@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
-import { supabase, withAuthTimeout, SESSION_UNVERIFIABLE_EVENT, forceResetStuckAuthState } from '../utils/supabase';
+import { supabase, withAuthTimeout, SESSION_UNVERIFIABLE_EVENT, forceResetStuckAuthState, SUPABASE_CLIENT_RECREATED_EVENT } from '../utils/supabase';
 import { cacheClear, cacheForceClearInFlight } from '../utils/cache';
 import {
   evaluateABACPolicy,
@@ -134,36 +134,60 @@ export function AuthProvider({ children }) {
 
     restoreSession();
 
-    // Listen for future auth state changes (token refresh, sign-out, etc.)
-    // SIGNED_IN is intentionally excluded here: both login() and registerCompanyAdmin()
-    // call signInWithPassword/signUp which fire SIGNED_IN. We let those callers
-    // manage state themselves (via pendingUserRef / direct setUser) to avoid races.
-    // TOKEN_REFRESHED handles silent session renewal; INITIAL_SESSION handles restores
-    // on hard reload (supplementing the getSession() call above for edge cases).
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
-      if (!mounted) return;
-      if (event === 'SIGNED_OUT' || !session?.user) {
-        setUser(null);
-        setAuthReady(true);
-      } else if (event === 'TOKEN_REFRESHED') {
-        // Silently refresh the user object when the JWT is renewed
-        const profile = await fetchProfile(session.user.id);
-        setUser(buildUser(session.user, profile));
-      } else if (event === 'SIGNED_IN') {
-        // Only auto-set user from onAuthStateChange on SIGNED_IN if no
-        // pending login() flow is in progress (i.e. not going through the
-        // ABAC + TransitionLoadingScreen path).
-        if (!pendingUserRef.current) {
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  // ── Auth-state listener, re-subscribed on client rebuild ────────────────────
+  // Kept as its own effect (separate from the session-restore bootstrap
+  // above) because it needs to re-run any time the underlying Supabase
+  // client is torn down and rebuilt (see recreateSupabaseClient in
+  // utils/supabase.js) — a subscription created against the OLD client
+  // instance is listening to something that's being discarded and will
+  // silently never fire again, which would otherwise look like "the app
+  // stopped reacting to sign-out / token refresh" with no error anywhere.
+  useEffect(() => {
+    let mounted = true;
+    let subscription = null;
+
+    function subscribe() {
+      if (subscription) subscription.unsubscribe();
+      // Listen for future auth state changes (token refresh, sign-out, etc.)
+      // SIGNED_IN is intentionally excluded here: both login() and registerCompanyAdmin()
+      // call signInWithPassword/signUp which fire SIGNED_IN. We let those callers
+      // manage state themselves (via pendingUserRef / direct setUser) to avoid races.
+      // TOKEN_REFRESHED handles silent session renewal; INITIAL_SESSION handles restores
+      // on hard reload (supplementing the getSession() call above for edge cases).
+      ({ data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+        if (!mounted) return;
+        if (event === 'SIGNED_OUT' || !session?.user) {
+          setUser(null);
+          setAuthReady(true);
+        } else if (event === 'TOKEN_REFRESHED') {
+          // Silently refresh the user object when the JWT is renewed
           const profile = await fetchProfile(session.user.id);
           setUser(buildUser(session.user, profile));
-          setAuthReady(true);
+        } else if (event === 'SIGNED_IN') {
+          // Only auto-set user from onAuthStateChange on SIGNED_IN if no
+          // pending login() flow is in progress (i.e. not going through the
+          // ABAC + TransitionLoadingScreen path).
+          if (!pendingUserRef.current) {
+            const profile = await fetchProfile(session.user.id);
+            setUser(buildUser(session.user, profile));
+            setAuthReady(true);
+          }
         }
-      }
-    });
+      }));
+    }
+
+    subscribe();
+    window.addEventListener(SUPABASE_CLIENT_RECREATED_EVENT, subscribe);
 
     return () => {
       mounted = false;
-      subscription.unsubscribe();
+      window.removeEventListener(SUPABASE_CLIENT_RECREATED_EVENT, subscribe);
+      if (subscription) subscription.unsubscribe();
     };
   }, []);
 

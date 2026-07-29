@@ -37,12 +37,23 @@ function anySignal(signals) {
 // Fix: also track each deadline by real timestamp, and sweep for anything
 // overdue the moment the tab becomes visible again (self-healing, same
 // pattern as the session-policy poll), instead of trusting the timer alone.
-const inFlightRequests = new Map(); // controller -> deadline (ms epoch)
+const inFlightRequests = new Map(); // controller -> { deadline, kind }
+
+// Requests are tagged by which Supabase subsystem they belong to, based on
+// the request URL (auth calls hit `/auth/v1/...`, everything else — table
+// reads/writes, RPC — hits `/rest/v1/...` or similar). This lets a targeted
+// reset (see forceResetStuckAuthState below) abort only the auth-lock call
+// that's actually stuck, instead of every unrelated request that happens to
+// be in flight at the same moment.
+function requestKindFromUrl(url) {
+  const str = typeof url === 'string' ? url : url?.toString?.() ?? '';
+  return str.includes('/auth/v1/') ? 'auth' : 'data';
+}
 
 function sweepOverdueRequests() {
   const now = Date.now();
-  for (const [controller, deadline] of inFlightRequests) {
-    if (now >= deadline) controller.abort();
+  for (const [controller, meta] of inFlightRequests) {
+    if (now >= meta.deadline) controller.abort();
   }
 }
 
@@ -70,23 +81,132 @@ if (typeof document !== 'undefined') {
 // queues invisibly waiting for a free slot — with no network error and often
 // no visible activity — which reproduces exactly the "everything times out
 // together even though the internet is fine, only a reload fixes it" symptom.
-// A small in-JS queue keeps at most MAX_CONCURRENT_REQUESTS actually in
-// flight at once; anything beyond that waits its turn here instead of
+// A small in-JS queue keeps at most MAX_CONCURRENT_REQUESTS_PER_TAB actually
+// in flight at once; anything beyond that waits its turn here instead of
 // occupying (and starving) a real browser connection.
-const MAX_CONCURRENT_REQUESTS = 4;
+//
+// THIS BUDGET IS PER TAB, AND THAT'S THE BUG BEHIND "only happens when I have
+// it open in another tab / browser window": activeRequestCount/requestQueue
+// below are plain in-memory module state, invisible to any other tab. Every
+// tab independently believes it can safely run 4 concurrent requests — but
+// the real per-host connection cap this whole mechanism exists to respect is
+// shared by the BROWSER across every tab of the same origin, not handed out
+// fresh per tab. Two tabs open at once (e.g. the app left open in one window
+// and reopened in another) can together fire up to 2 x 4 = 8 concurrent
+// requests at a shared 6-connection budget — reproducing, between tabs, the
+// exact socket-starvation pileup this file already guards against within a
+// single tab. Worse, the self-heal (forceResetStuckAuthState, below) only
+// resets the CALLING tab's bookkeeping — it can't do anything about a
+// *different* tab that's still holding sockets, so the reset appears to run
+// (it's logged) but the timeouts keep coming back.
+//
+// Fix: give every tab a live, browser-native view of how many sibling tabs
+// are currently open, via navigator.locks — each tab just holds its own
+// uniquely-named lock for its whole lifetime as a presence marker (the
+// browser auto-releases it on close/crash/navigation, no cleanup needed),
+// and any tab can list currently-held locks to count how many are alive
+// right now. Note this never WAITS to acquire a *shared* lock name the way
+// the old navigator.locks-based auth lock did (see inProcessLock above for
+// why that got replaced) — each tab's presence lock has a unique name it's
+// guaranteed to get instantly, so there's no queue here to get stuck. Then
+// simply divide the same conservative single-tab budget this file already
+// chose (4) by however many tabs are actually open, so the *combined* total
+// across all tabs stays close to what one tab alone was already using.
+const MAX_CONCURRENT_REQUESTS_PER_TAB = 4;
+let openTabCount = 1;
+
+if (typeof navigator !== 'undefined' && navigator.locks?.query && typeof document !== 'undefined') {
+  const tabId = `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  // Held for the entire life of the tab; intentionally never resolves the
+  // inner promise — that's what keeps the lock (and this tab's "I'm open"
+  // signal) alive until the browser tears the page down.
+  const presenceController = new AbortController();
+  navigator.locks
+    .request(`app-tab-presence:${tabId}`, { signal: presenceController.signal }, () => new Promise(() => {}))
+    .catch(() => {});
+
+  // Vite HMR replaces this module in place whenever it (or a file that
+  // imports it) is edited — that is NOT a tab close/crash/navigation, so the
+  // "browser auto-releases it on teardown" assumption above never kicks in
+  // for HMR. Every hot reload during a dev session was silently acquiring
+  // ANOTHER presence lock on top of the still-held old one, permanently
+  // inflating openTabCount for the rest of the session (this tab looking
+  // like more and more "sibling tabs" to itself) and shrinking its own real
+  // connection-slot budget (MAX_CONCURRENT_REQUESTS_PER_TAB / openTabCount)
+  // until routine request bursts (e.g. the handful of queries fired right
+  // after login) blew past it and started queuing/timing out — exactly the
+  // cascading failure this file's own recovery logging shows. Abort this
+  // tab's own lock right before the module is torn down for a hot reload so
+  // it doesn't outlive the code that's supposed to be holding it.
+  if (import.meta.hot) {
+    import.meta.hot.dispose(() => presenceController.abort());
+  }
+
+  async function refreshOpenTabCount() {
+    try {
+      const state = await navigator.locks.query();
+      const held = (state.held || []).filter((l) => l.name?.startsWith('app-tab-presence:'));
+      openTabCount = Math.max(1, held.length);
+    } catch {
+      // query() unsupported/failed — keep the last known count (starts at 1,
+      // i.e. behaves exactly like the old single-tab-only logic).
+    }
+    // A closed sibling tab freeing up budget should let anything already
+    // queued here proceed immediately, not wait for its own next tick.
+    runNext();
+  }
+  refreshOpenTabCount();
+  setInterval(refreshOpenTabCount, 5_000);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') refreshOpenTabCount();
+  });
+}
+
+// Never drop to true single-request serialization even with many tabs open —
+// a little oversubscription under heavy multi-tab use is a far smaller risk
+// than re-introducing single-file queuing latency for every save/poll.
+function currentSlotBudget() {
+  return Math.max(2, Math.floor(MAX_CONCURRENT_REQUESTS_PER_TAB / openTabCount));
+}
+
 let activeRequestCount = 0;
 const requestQueue = [];
 
 function runNext() {
-  if (activeRequestCount >= MAX_CONCURRENT_REQUESTS || requestQueue.length === 0) return;
+  if (activeRequestCount >= currentSlotBudget() || requestQueue.length === 0) return;
   activeRequestCount++;
-  const { resolve } = requestQueue.shift();
-  resolve();
+  const entry = requestQueue.shift();
+  clearTimeout(entry.timer);
+  entry.resolve();
 }
 
+// Every other wait in this file is bounded — FETCH_TIMEOUT_MS,
+// DB_CALL_TIMEOUT_MS, AUTH_CALL_TIMEOUT_MS, LOCK_FN_TIMEOUT_MS,
+// IN_FLIGHT_SAFETY_TIMEOUT_MS — except this one. acquireSlot() only
+// resolves when releaseSlot() (below) calls runNext(), which only happens
+// once activeRequestCount actually decrements. A request sitting in
+// requestQueue hasn't been given a controller yet, so it isn't in
+// inFlightRequests either — invisible to sweepOverdueRequests AND to
+// forceResetStuckAuthState. So if activeRequestCount ever drifts out of
+// sync with reality (a slot acquired whose owner's fetch never truly
+// settles even after abort() — see the note on releaseSlot below for why
+// that can happen), every *future* request queues here forever with zero
+// visible network activity and nothing in this file can ever recover it —
+// this is what actually required a hard reload. Give the queue wait itself
+// a hard ceiling so a request that's waited too long for a slot fails
+// fast and visibly instead of hanging silently.
+const QUEUE_WAIT_TIMEOUT_MS = FETCH_TIMEOUT_MS;
+
 function acquireSlot() {
-  return new Promise((resolve) => {
-    requestQueue.push({ resolve });
+  return new Promise((resolve, reject) => {
+    const entry = { resolve };
+    entry.timer = setTimeout(() => {
+      const idx = requestQueue.indexOf(entry);
+      if (idx === -1) return; // already granted a slot; timer fired too late to matter
+      requestQueue.splice(idx, 1);
+      reject(new Error('Timed out waiting for an available connection slot'));
+    }, QUEUE_WAIT_TIMEOUT_MS);
+    requestQueue.push(entry);
     runNext();
   });
 }
@@ -97,10 +217,13 @@ function releaseSlot() {
 }
 
 export function fetchWithTimeout(url, options = {}) {
+  const kind = requestKindFromUrl(url);
+  console.debug(`[fetch] queuing (${kind}):`, typeof url === 'string' ? url : url?.toString?.());
   return acquireSlot().then(() => {
+    console.debug(`[fetch] slot granted, dispatching (${kind}):`, typeof url === 'string' ? url : url?.toString?.());
     const controller = new AbortController();
     const deadline = Date.now() + FETCH_TIMEOUT_MS;
-    inFlightRequests.set(controller, deadline);
+    inFlightRequests.set(controller, { deadline, kind });
     const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 
     const signal = options.signal
@@ -138,7 +261,13 @@ export function fetchWithTimeout(url, options = {}) {
 // promise chain) instead of navigator.locks, so we get serialization
 // without the cross-tab API that was getting stuck.
 const lockChains = new Map();
+// Diagnostic-only counter, not used for any control flow — just gives each
+// lock attempt a distinguishable id in the console so overlapping/queued
+// attempts for the same lock name can be told apart when reading the logs.
+let lockAttemptSeq = 0;
 async function inProcessLock(name, acquireTimeout, fn) {
+  const attemptId = ++lockAttemptSeq;
+  console.debug(`[authLock #${attemptId}] requesting "${name}" (queue depth before this: ${lockChains.has(name) ? 1 : 0})`);
   // .catch(() => {}) here is load-bearing: if we awaited the previous
   // holder's promise directly and it had REJECTED (e.g. a transient auth
   // error while the connection was flaky), `await previous` below would
@@ -172,6 +301,7 @@ async function inProcessLock(name, acquireTimeout, fn) {
   } else {
     await previous;
   }
+  console.debug(`[authLock #${attemptId}] acquired "${name}", running holder`);
 
   // Bound how long any single lock holder can hold the lock. Without this,
   // an operation that a caller elsewhere gives up *waiting* on (e.g.
@@ -194,19 +324,63 @@ async function inProcessLock(name, acquireTimeout, fn) {
       ),
     ]);
   } finally {
+    console.debug(`[authLock #${attemptId}] releasing "${name}"`);
     release();
     if (lockChains.get(name) === current) lockChains.delete(name);
   }
 }
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
-  auth: {
-    lock: inProcessLock,
-  },
-  global: {
-    fetch: fetchWithTimeout,
-  },
-});
+// The client itself is reassignable (see recreateSupabaseClient below) —
+// every importer uses `import { supabase } from ...`, which is a live ES
+// module binding, so reassigning this reference updates what every caller
+// sees without them needing to re-import anything.
+function buildSupabaseClient() {
+  return createClient(supabaseUrl, supabaseAnonKey, {
+    auth: {
+      lock: inProcessLock,
+    },
+    global: {
+      fetch: fetchWithTimeout,
+    },
+  });
+}
+
+export let supabase = buildSupabaseClient();
+
+// Dispatched whenever the client is torn down and rebuilt (see
+// recreateSupabaseClient below). Anything holding a subscription tied to
+// the OLD client instance — most importantly AuthContext's
+// supabase.auth.onAuthStateChange listener — is now listening to a client
+// that's being discarded and will never fire again. Listen for this event
+// and re-subscribe against the new `supabase` reference.
+export const SUPABASE_CLIENT_RECREATED_EVENT = 'supabase:client-recreated';
+
+// ── Nuclear option: rebuild the client entirely ─────────────────────────────
+// Everything above this point (fetchWithTimeout's slot queue + its own
+// timeout, inProcessLock with its acquire/hold timeouts, withAuthTimeout/
+// withDbTimeout) is a layer WE wrote and fully control — every one of them
+// has a way to fail fast and recover. What none of them can reach is
+// GoTrueClient's own PRIVATE internal state (its in-memory session cache,
+// its own retry/refresh bookkeeping) — that's inside supabase-js itself,
+// invoked before our `lock` or `fetch` overrides are ever called for a
+// given request. If something in there gets wedged, calls die with zero
+// trace in our own logging (no authLock line, no [fetch] line) and no
+// amount of patching our wrapper code reaches it — confirmed by the console
+// trace showing exactly that: the last successful authLock cycle followed
+// by silence, repeating on every subsequent attempt.
+// The only thing guaranteed to reset that private state short of a full
+// page reload is discarding the GoTrueClient instance and constructing a
+// fresh one. This does throw away any of the old client's own in-flight
+// promises, but by the time this runs the pollers have already given up
+// on those (consecutive-failure threshold), so there's nothing worth
+// preserving on the old instance.
+export function recreateSupabaseClient() {
+  console.warn('[supabase] Rebuilding the Supabase client after repeated unrecoverable failures.');
+  supabase = buildSupabaseClient();
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(SUPABASE_CLIENT_RECREATED_EVENT));
+  }
+}
 
 // Timeout guard for the auth calls themselves (getSession, signOut, ...).
 // fetchWithTimeout above only protects the actual network request — it
@@ -304,13 +478,116 @@ export async function withRetryOnTimeout(queryFn, label = 'db-write') {
 // exactly like a reload would, but without losing app state. Callers (the
 // pollers below) only reach for this after several consecutive failures —
 // a healthy app should never need it.
+//
+// IMPORTANT: this only touches auth-kind requests (see requestKindFromUrl
+// above). It used to abort every entry in inFlightRequests indiscriminately,
+// which meant a stuck resume-time getSession() call would also abort
+// whatever unrelated data request (a poll tick, a putSubscription write,
+// etc.) happened to be in flight at that exact moment — those requests
+// hadn't actually timed out on their own, they were just collateral damage,
+// which is what made unrelated failures (attendance poll, notifications
+// poll, a save) all appear to fail together the instant a tab regained
+// focus. Scoping the abort to auth-kind entries means only the genuinely
+// wedged auth call gets cut short; other in-flight requests keep running
+// and succeed or fail on their own independent timeout.
+// Tracks how many times in a row forceResetStuckAuthState has been called
+// with no successful request in between. Our own bookkeeping (locks,
+// in-flight requests, connection slots) is cheap to reset and safe to try
+// first — but if it keeps getting called again right after, that bookkeeping
+// was never the actual problem. Escalate to rebuilding the client itself
+// once that's happened enough times in a row.
+let consecutiveForceResets = 0;
+const FORCE_RESET_ESCALATION_THRESHOLD = 2;
+
+// Every layer above this point is something the app can repair on its own —
+// a rebuild included. But if a rebuild ALSO doesn't lead to a success before
+// the pollers give up and force-reset again, that's no longer "supabase-js's
+// private state was wedged" (a rebuild fixes that) — it's a real outage or a
+// dead network path, which nothing in this file can talk its way around.
+// Surface the same "connection issue, please reload" prompt the resume-time
+// session check (checkSessionOnResume, below) already uses for this exact
+// situation, instead of silently rebuilding and retrying forever with the
+// user never told anything is wrong. Reset in notifySupabaseRequestSucceeded
+// alongside consecutiveForceResets so a client that recovers isn't penalized
+// by a past bad streak.
+let consecutiveRebuildsWithoutSuccess = 0;
+const REBUILD_ESCALATION_THRESHOLD = 2;
+
 export function forceResetStuckAuthState() {
   console.warn('[supabase] Forcing reset of internal auth lock / in-flight request state after repeated failures.');
   lockChains.clear();
-  for (const controller of inFlightRequests.keys()) {
-    try { controller.abort(); } catch { /* already aborted/settled */ }
+  for (const [controller, meta] of inFlightRequests) {
+    if (meta.kind === 'auth') {
+      try { controller.abort(); } catch { /* already aborted/settled */ }
+      inFlightRequests.delete(controller);
+    }
   }
-  inFlightRequests.clear();
+  // acquireSlot()'s own timeout (above) stops a *new* request from queuing
+  // forever, but it can't repair activeRequestCount itself if it's already
+  // drifted above reality — every future request would keep queuing behind
+  // a budget that no longer reflects any real in-flight work. This is the
+  // one piece of bookkeeping in this file with no other self-healing path,
+  // so as a last resort, zero it and let anything already queued proceed.
+  activeRequestCount = 0;
+  runNext();
+
+  consecutiveForceResets++;
+  if (consecutiveForceResets >= FORCE_RESET_ESCALATION_THRESHOLD) {
+    consecutiveForceResets = 0;
+    recreateSupabaseClient();
+    consecutiveRebuildsWithoutSuccess++;
+    if (consecutiveRebuildsWithoutSuccess >= REBUILD_ESCALATION_THRESHOLD) {
+      reportUnrecoverableConnectionIssue();
+    }
+  }
+}
+
+// Surfaces recovery from an unrecoverable connection state. Two very
+// different situations share this one entry point:
+//  - Tab hidden/minimized right now: nobody can be mid-edit in a tab they
+//    aren't looking at, so there's nothing an announced-reload-on-return
+//    could lose. BUT calling location.reload() WHILE hidden is unreliable —
+//    browsers throttle/defer navigation for background tabs, which can leave
+//    the page torn down (aborted requests, cleared client/lock state — see
+//    forceResetStuckAuthState above, already run by the time this fires)
+//    without the actual page swap ever completing until the tab is looked
+//    at again. That reproduced as "switch away, switch back, everything is
+//    just broken" — worse than the modal it was meant to replace. Instead,
+//    only set a flag here; the visibilitychange listener below fires the
+//    real reload() the instant the tab is actually foregrounded, which
+//    browsers execute reliably, and still happens before the person has any
+//    chance to click or type anything.
+//  - Tab visible right now: someone may genuinely be looking at unsaved
+//    work, so reloading out from under them is exactly the destructive
+//    surprise the modal was written to avoid — show the prompt and let them
+//    choose the moment.
+let reloadPendingOnReturn = false;
+
+export function reportUnrecoverableConnectionIssue() {
+  if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+    console.warn('[supabase] Unrecoverable connection issue while tab is hidden/minimized — will reload as soon as it is foregrounded.');
+    reloadPendingOnReturn = true;
+    return;
+  }
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(SESSION_UNVERIFIABLE_EVENT));
+  }
+}
+
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && reloadPendingOnReturn) {
+      reloadPendingOnReturn = false;
+      window.location.reload();
+    }
+  });
+}
+
+// Called by any caller after a request actually succeeds, so a past streak
+// of stuck-state resets doesn't count against a client that's healthy again.
+export function notifySupabaseRequestSucceeded() {
+  consecutiveForceResets = 0;
+  consecutiveRebuildsWithoutSuccess = 0;
 }
 
 // ── Force a session check on tab return ─────────────────────────────────────
@@ -382,12 +659,12 @@ async function checkSessionOnResume() {
     return; // recovered — session is fine, nothing further to do.
   } catch (retryErr) {
     // One retry failed too. Don't keep re-entering the shared lock queue —
-    // surface the recovery prompt instead of retrying forever with no
-    // feedback while adding more contention.
-    console.warn('Session check on tab resume retry failed, forcing logout:', retryErr);
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent(SESSION_UNVERIFIABLE_EVENT));
-    }
+    // hand off to reportUnrecoverableConnectionIssue, which reloads silently
+    // if the tab is hidden/minimized right now (nothing to lose) or shows
+    // the recovery prompt if it's visible (don't reload out from under
+    // someone who may be looking at unsaved work).
+    console.warn('Session check on tab resume retry failed:', retryErr);
+    reportUnrecoverableConnectionIssue();
   } finally {
     checkingSessionOnResume = false;
   }
@@ -403,8 +680,52 @@ if (typeof window !== 'undefined') {
   // The visibilitychange check above fires the moment you switch back to
   // the tab, which can be before the underlying network has actually
   // recovered from an idle-drop. The `online` event fires when the browser
-  // itself confirms connectivity is back, so also trigger a check then.
+  // itself confirms connectivity is back — run the same check then too,
+  // REGARDLESS of visibility (no `document.visibilityState === 'visible'`
+  // guard here anymore). Checking only while visible meant a connection
+  // that died while the tab was backgrounded was never verified — let alone
+  // fixed — until the person actually switched back, at which point any
+  // failure surfaces exactly when they're mid-edit. Checking on `online`
+  // even while hidden lets checkSessionOnResume's own failure path (above)
+  // reload silently while nobody's looking, so by the time the tab is
+  // actually switched back to, it's already fresh.
   window.addEventListener('online', () => {
-    if (document.visibilityState === 'visible') checkSessionOnResume();
+    checkSessionOnResume();
+  });
+}
+
+// ── Unconditional hard reload on return ─────────────────────────────────────
+// Everything above tries to be surgical: detect an actual connection
+// failure, then decide whether it's safe to reload. In practice that still
+// left gaps — the pollers that would have detected a failure skip all work
+// while hidden by design (see SubscriptionContext/NotificationsContext), so
+// a lot of "away for a while" cases never accumulate enough failures to
+// trip anything at all, and the page just silently sits stale on return.
+// This replaces the guesswork with a blunt, deterministic rule instead:
+// ANY time the tab was hidden/minimized and comes back, hard reload — no
+// failure detection required. document.visibilityState (the Page Visibility
+// API) is supported the same way across every current browser (Chrome,
+// Edge, Firefox, Safari, mobile included), so this doesn't need per-browser
+// handling. `pageshow` with `event.persisted` covers the one case
+// visibilitychange doesn't reliably catch on its own: a page restored from
+// the browser's back-forward cache (e.g. a mobile swipe-back gesture) can
+// come back to "visible" without necessarily firing visibilitychange first
+// on every platform.
+if (typeof document !== 'undefined' && typeof window !== 'undefined') {
+  let wasHiddenForReload = false;
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+      wasHiddenForReload = true;
+    } else if (document.visibilityState === 'visible' && wasHiddenForReload) {
+      wasHiddenForReload = false;
+      window.location.reload();
+    }
+  });
+
+  window.addEventListener('pageshow', (event) => {
+    if (event.persisted) {
+      window.location.reload();
+    }
   });
 }

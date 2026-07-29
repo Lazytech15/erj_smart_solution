@@ -100,17 +100,20 @@ const inFlight = new Map();
 //
 // IMPORTANT: this must stay LONGER than the worst-case time the layers
 // underneath `fn()` can legitimately take to settle on their own — right now
-// that's the auth lock (12s, see inProcessLock in utils/supabase.js) plus
-// the per-fetch timeout (15s, FETCH_TIMEOUT_MS), which can run sequentially
-// for a single call (resolve the session, THEN issue the request) for up to
-// ~27s worst case. This was previously set to 20s — SHORTER than that
-// worst case — so this safety net was giving up and clearing its own
-// bookkeeping while the real underlying call was still legitimately
-// running (and still holding the auth lock) for several more seconds.
-// Any other call made during that gap would queue behind a lock this layer
-// had already "moved on" from, i.e. the exact "one thing times out and
-// everything after it hangs" pattern. Keep this comfortably above the sum
-// of the layers it wraps, with margin, whenever those change.
+// that's the auth lock (LOCK_FN_TIMEOUT_MS, 6s, see inProcessLock in
+// utils/supabase.js) plus the per-fetch timeout (15s, FETCH_TIMEOUT_MS),
+// which can run sequentially for a single call (resolve the session, THEN
+// issue the request) for up to ~21s worst case — plus queueing time behind
+// the per-tab connection-slot limiter (see MAX_CONCURRENT_REQUESTS_PER_TAB /
+// currentSlotBudget in utils/supabase.js), which can add real delay under
+// heavy multi-tab load. This was previously set to 20s — SHORTER than the
+// lock+fetch worst case alone — so this safety net was giving up and
+// clearing its own bookkeeping while the real underlying call was still
+// legitimately running (and still holding the auth lock) for several more
+// seconds. Any other call made during that gap would queue behind a lock
+// this layer had already "moved on" from, i.e. the exact "one thing times
+// out and everything after it hangs" pattern. Keep this comfortably above
+// the sum of the layers it wraps, with margin, whenever those change.
 const IN_FLIGHT_SAFETY_TIMEOUT_MS = 32_000;
 
 export async function cached(key, fn, ttlMs = DEFAULT_TTL_MS) {

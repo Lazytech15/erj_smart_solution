@@ -1,6 +1,6 @@
 import { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
 import { getSubscription, putSubscription, getAttendanceRecords, putAttendanceRecords, getPendingRegistrations, insertPendingRegistration, updatePendingRegistration, deletePendingRegistration, createEmployeeAccount, updateEmployeeAccount, getEmployeeAccount } from '../utils/db';
-import { forceResetStuckAuthState } from '../utils/supabase';
+import { forceResetStuckAuthState, notifySupabaseRequestSucceeded } from '../utils/supabase';
 import { cacheForceClearInFlight } from '../utils/cache';
 import { useAuth } from './AuthContext';
 
@@ -200,9 +200,29 @@ export function SubscriptionProvider({ children }) {
 
     let consecutiveFailures = 0;
     let cancelled = false;
+    let ticking = false; // guards against the visibility listener and the delayed setTimeout chain both firing at once
 
+    // ── Reasoning for the visibilitychange listener below ─────────────────
+    // tick()'s own "skip while hidden" check only stops it from firing WORK
+    // while backgrounded — it does nothing to keep the setTimeout chain that
+    // schedules the NEXT tick() running on time. Browsers throttle timers in
+    // hidden tabs and can suspend them almost entirely once a tab is
+    // minimized/discarded, so a chain that's purely "tick, then setTimeout
+    // the next tick" can sit stalled for the tab's entire backgrounded
+    // duration — coming back to the tab doesn't un-throttle an
+    // already-scheduled timer, it just means the next one (whenever it
+    // eventually fires) will finally run. In practice this reproduced as
+    // "polling just stops after minimizing and never comes back" even
+    // though nothing here ever errors or logs after the last attempt.
+    // NotificationsContext's poller already listens for visibilitychange to
+    // retick immediately on return; this poller was missing that same
+    // safety net. `ticking` prevents this immediate retick from overlapping
+    // with a tick() that the delayed setTimeout chain fires around the same
+    // moment.
     async function tick() {
       if (document.visibilityState !== 'visible') return; // don't poll while backgrounded
+      if (ticking) return; // a tick is already in flight — don't stack another
+      ticking = true;
       let records;
       try {
         records = await getAttendanceRecords(user.subscriptionId);
@@ -225,8 +245,11 @@ export function SubscriptionProvider({ children }) {
           cacheForceClearInFlight();
         }
         return;
+      } finally {
+        ticking = false;
       }
       consecutiveFailures = 0;
+      notifySupabaseRequestSucceeded();
       if (records === null || cancelled) return; // fetch failed — keep existing
       setSubscription(prev => {
         if (!prev) return prev;
@@ -238,6 +261,7 @@ export function SubscriptionProvider({ children }) {
 
     const BASE_INTERVAL_MS = 15000;
     const MAX_INTERVAL_MS = 120000; // back off to at most once every 2 min
+    let nextRunAt = Date.now() + BASE_INTERVAL_MS;
     let timeoutId = setTimeout(runAndReschedule, BASE_INTERVAL_MS);
 
     async function runAndReschedule() {
@@ -245,12 +269,33 @@ export function SubscriptionProvider({ children }) {
       if (cancelled) return;
       // Exponential-ish backoff while failures persist, reset once healthy.
       const delay = Math.min(BASE_INTERVAL_MS * 2 ** consecutiveFailures, MAX_INTERVAL_MS);
+      nextRunAt = Date.now() + delay;
       timeoutId = setTimeout(runAndReschedule, delay);
     }
+
+    // Only step in when the scheduled timer has actually been missed (i.e.
+    // it should have fired by now but didn't, because the tab was hidden
+    // and the browser throttled/froze it) — NOT on every visibilitychange
+    // event. visibilitychange can fire while you're still on the page for
+    // reasons that have nothing to do with a real background stall
+    // (detaching/reattaching DevTools, an OS-level overlay, quick alt-tab).
+    // Firing an unconditional extra tick() on each of those stacked extra
+    // requests on top of the ones the normal timer was already about to
+    // make — enough of them in a short window saturate the 4-slot fetch
+    // budget in supabase.js and reproduce the exact "everything's timing
+    // out" symptom, this time while the tab is genuinely in the foreground.
+    const handleVisibility = () => {
+      if (document.visibilityState !== 'visible') return;
+      if (Date.now() < nextRunAt) return; // not overdue — the existing timer will fire on time
+      clearTimeout(timeoutId);
+      runAndReschedule();
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
 
     return () => {
       cancelled = true;
       clearTimeout(timeoutId);
+      document.removeEventListener('visibilitychange', handleVisibility);
     };
   }, [user?.subscriptionId]); // eslint-disable-line
 

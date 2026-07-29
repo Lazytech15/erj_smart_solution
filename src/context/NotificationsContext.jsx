@@ -16,7 +16,7 @@ import {
   deleteAnnouncement,
   getPendingRegistrations,
 } from '../utils/db';
-import { forceResetStuckAuthState } from '../utils/supabase';
+import { forceResetStuckAuthState, notifySupabaseRequestSucceeded } from '../utils/supabase';
 import { cacheForceClearInFlight } from '../utils/cache';
 import { useAuth } from './AuthContext';
 import { useSubscription } from './SubscriptionContext';
@@ -87,6 +87,7 @@ export function NotificationsProvider({ children }) {
         ]);
         if (cancelled) return;
         consecutiveFailures = 0;
+        notifySupabaseRequestSucceeded();
         setAnnouncements(prev => (JSON.stringify(prev) === JSON.stringify(notifs) ? prev : notifs));
         if (setPendingEmployeesExternal) {
           setPendingEmployeesExternal(prev =>
@@ -110,17 +111,28 @@ export function NotificationsProvider({ children }) {
 
     const BASE_INTERVAL_MS = 20000;
     const MAX_INTERVAL_MS = 120000; // back off to at most once every 2 min
+    let nextRunAt = Date.now() + BASE_INTERVAL_MS;
     let timeoutId = setTimeout(runAndReschedule, BASE_INTERVAL_MS);
 
     async function runAndReschedule() {
       await tick();
       if (cancelled) return;
       const delay = Math.min(BASE_INTERVAL_MS * 2 ** consecutiveFailures, MAX_INTERVAL_MS);
+      nextRunAt = Date.now() + delay;
       timeoutId = setTimeout(runAndReschedule, delay);
     }
 
+    // Only retick immediately when the scheduled timer is actually overdue
+    // (missed while genuinely backgrounded) — see the matching comment in
+    // SubscriptionContext's attendance poll for why firing on every
+    // visibilitychange event (including ones that don't reflect a real
+    // background stall) stacks extra requests on top of the normal timer
+    // and saturates the fetch slot budget.
     const handleVisibility = () => {
-      if (document.visibilityState === 'visible') tick();
+      if (document.visibilityState !== 'visible') return;
+      if (Date.now() < nextRunAt) return;
+      clearTimeout(timeoutId);
+      runAndReschedule();
     };
     document.addEventListener('visibilitychange', handleVisibility);
 
