@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { ArrowRight, ArrowLeft, Check, Building2, CreditCard, Users, Eye, EyeOff, Zap, X, FileText, Shield } from 'lucide-react';
+import { ArrowRight, ArrowLeft, Check, Building2, CreditCard, Users, Eye, EyeOff, Zap, FileText, Shield } from 'lucide-react';
 import { PLANS, useSubscription } from '../../context/SubscriptionContext';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
@@ -100,12 +100,10 @@ function LegalModal({ type, onClose }) {
     <div
       className="fixed inset-0 z-50 flex items-center justify-center p-4"
       style={{ background: 'rgba(15,23,42,0.6)', backdropFilter: 'blur(4px)' }}
-      onClick={onClose}
     >
       <div
         className="bg-white rounded-2xl w-full max-w-lg max-h-[80vh] flex flex-col overflow-hidden"
         style={{ boxShadow: '0 24px 64px rgba(0,0,0,0.18), 0 2px 8px rgba(0,0,0,0.08)' }}
-        onClick={e => e.stopPropagation()}
       >
         {/* Header */}
         <div
@@ -124,13 +122,6 @@ function LegalModal({ type, onClose }) {
               <p className="text-xs text-slate-400">ERJ Smart Solutions · Last updated June 2025</p>
             </div>
           </div>
-          <button
-            onClick={onClose}
-            className="w-8 h-8 rounded-lg flex items-center justify-center text-slate-400 hover:text-slate-700 transition-colors"
-            style={{ background: '#f1f5f9' }}
-          >
-            <X size={14} />
-          </button>
         </div>
 
         {/* Scrollable body */}

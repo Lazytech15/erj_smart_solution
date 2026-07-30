@@ -3,16 +3,50 @@ import { Building2, Plus, Trash2 } from 'lucide-react';
 import { useSubscription } from '../context/SubscriptionContext';
 import { SectionHeader, Modal, InputField, EmptyState } from '../components/ui';
 import { useToast } from '../context/ToastContext';
+import { useAuth } from '../context/AuthContext';
+import { useFormDraft } from '../hooks/useFormDraft';
+import { departmentDraftKey, isDepartmentFormMeaningful } from '../utils/draftKeys';
+import DraftRestoredBanner from '../components/DraftRestoredBanner';
 import PlanGate from '../components/PlanGate';
 
 function DepartmentsContent() {
   const toast = useToast();
+  const { user } = useAuth();
   const { subscription, addDepartment, removeDepartment } = useSubscription();
   const departments = subscription?.departments || [];
   const employees = subscription?.enrolledEmployees || [];
 
   const [addModal, setAddModal] = useState(false);
   const [newName, setNewName] = useState('');
+  const [draftRestored, setDraftRestored] = useState(false);
+
+  // ── Draft persistence ────────────────────────────────────────────
+  const draftKey = departmentDraftKey(user?.id);
+  const { clear: clearFormDraft } = useFormDraft(
+    draftKey,
+    { form: { name: newName } },
+    {
+      isMeaningful: isDepartmentFormMeaningful,
+      onRestore: (draft) => {
+        setNewName(draft.form?.name || '');
+        setAddModal(true);
+        setDraftRestored(true);
+        toast('Restored the department name you were entering before the page reloaded.', 'info');
+      },
+    }
+  );
+
+  function discardDraft() {
+    clearFormDraft();
+    setNewName('');
+    setDraftRestored(false);
+  }
+
+  function handleClose() {
+    clearFormDraft();
+    setDraftRestored(false);
+    setAddModal(false);
+  }
 
   async function handleAdd() {
     const name = newName.trim();
@@ -21,8 +55,10 @@ function DepartmentsContent() {
     try {
       await addDepartment(name);
       toast(`Department "${name}" added`, 'success');
+      clearFormDraft();
       setNewName('');
       setAddModal(false);
+      setDraftRestored(false);
     } catch (err) {
       toast(err.message || 'Could not add department — please try again.', 'error');
     }
@@ -75,14 +111,21 @@ function DepartmentsContent() {
         </div>
       )}
 
-      <Modal open={addModal} onClose={() => setAddModal(false)} title="Add Department" width="max-w-sm"
+      <Modal open={addModal} onClose={handleClose} title="Add Department" width="max-w-sm"
         footer={
           <>
-            <button className="btn-secondary" onClick={() => setAddModal(false)}>Cancel</button>
+            <button className="btn-secondary" onClick={handleClose}>Cancel</button>
             <button className="btn-primary" onClick={handleAdd}>Add</button>
           </>
         }
       >
+        {draftRestored && (
+          <DraftRestoredBanner
+            className="mb-3"
+            message="Restored the name you were entering before the page reloaded."
+            onDiscard={discardDraft}
+          />
+        )}
         <InputField label="Department Name" value={newName} onChange={setNewName} placeholder="e.g. Engineering" autoFocus />
       </Modal>
     </div>

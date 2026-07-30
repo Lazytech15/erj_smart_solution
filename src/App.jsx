@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import { useEffect, useState, useRef } from 'react';
+import { BrowserRouter, Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import ConnectionIssueModal from './components/ConnectionIssueModal';
 import { SubscriptionProvider, useSubscription } from './context/SubscriptionContext';
@@ -8,6 +8,15 @@ import { NotificationsProvider } from './context/NotificationsContext';
 import AppLayout from './components/layout/AppLayout';
 import PlanGate from './components/PlanGate';
 import LoadingScreen from './components/LoadingScreen';
+import { loadDraft, findDraftsByPrefix } from './utils/formDraft';
+import { employeeDraftKey, isAddEmployeeFormMeaningful, csvImportDraftKey, isCsvImportDraftMeaningful } from './utils/employeeDraft';
+import {
+  editEmployeeDraftPrefix, isEditEmployeeFormMeaningful,
+  attendanceDraftPrefix, isAttendanceFormMeaningful,
+  leaveDraftPrefix, isLeaveFormMeaningful,
+  shiftDraftPrefix, isShiftFormMeaningful,
+  departmentDraftKey, isDepartmentFormMeaningful,
+} from './utils/draftKeys';
 
 import LandingPage from './pages/public/LandingPage';
 import PricingPage from './pages/public/PricingPage';
@@ -45,6 +54,16 @@ function PrivateRoute({ children }) {
   if (!user) return <Navigate to="/login" replace />;
   if (loading) return <LoadingScreen />;
   if (!subscription) return <Navigate to="/pricing" replace />;
+
+  // A subscription row exists as soon as signup completes — well before the
+  // admin has actually finished /onboard (enrolled anyone, hit "Finish
+  // setup"). Previously nothing distinguished that from a fully-onboarded
+  // subscription, so a reload (or any other navigation) that ever landed
+  // the user on /app/* mid-onboarding just... stayed there, silently
+  // dropping the in-progress enrollment flow. Send them back to finish it.
+  if (subscription.onboardingComplete === false) {
+    return <Navigate to="/onboard" replace />;
+  }
 
   if (subscription.status === 'cancelled' && location.pathname !== '/app/subscription') {
     return <Navigate to="/app/subscription" replace />;
@@ -97,6 +116,7 @@ function PublicRoute({ children }) {
   if (!authReady) return <LoadingScreen />;
   if (['superadmin', 'sub_superadmin'].includes(user?.role)) return <Navigate to="/superadmin" replace />;
   if (user && (loading || !subscription)) return <LoadingScreen />;
+  if (user && subscription.onboardingComplete === false) return <Navigate to="/onboard" replace />;
   if (user && subscription.status !== 'cancelled') return <Navigate to="/app/dashboard" replace />;
   return children;
 }
@@ -132,6 +152,120 @@ function FirstLoadGate({ children }) {
       </div>
     </>
   );
+}
+
+/**
+ * A hard reload always lands on whatever route was in the address bar —
+ * but plenty of things (a fresh login, a session-resume redirect, opening
+ * the app from a bookmark/PWA icon) drop the user on /app/dashboard
+ * regardless of what they were doing. If they have an unsaved form draft
+ * sitting in localStorage — Add/Edit Employee, an attendance record, a
+ * leave request, a shift, or a new department — this jumps them straight
+ * to the page that owns it (where the page's own restore logic takes
+ * over and reopens the right modal with the restored data) instead of
+ * leaving it to be found only if they happen to navigate there manually.
+ *
+ * Runs at most once per app boot — the ref guard means this checks on the
+ * very first settled render and then gets out of the way, so it never
+ * fights with the user's own navigation afterward.
+ *
+ * Each entry below only checks "is there a draft worth resuming", using
+ * the same isMeaningful logic the destination page itself uses — the
+ * actual restore (finding the record, opening the modal, showing the
+ * banner) still happens there once it mounts.
+ */
+function hasResumableEditDraft(prefix, records, isMeaningful) {
+  for (const { key, data } of findDraftsByPrefix(prefix)) {
+    const idPart = key.slice(prefix.length);
+    if (idPart === 'add') {
+      if (isMeaningful(data, null)) return true;
+      continue;
+    }
+    const target = records.find(r => String(r.id) === idPart);
+    if (target && isMeaningful(data, target)) return true;
+  }
+  return false;
+}
+
+function DraftResumeRedirect() {
+  const { user, authReady } = useAuth();
+  const { subscription, loading } = useSubscription();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const checkedRef = useRef(false);
+
+  useEffect(() => {
+    if (checkedRef.current) return;
+    // Wait until auth + subscription have actually settled — checking mid-
+    // bootstrap risks reading a stale `user` from a previous render.
+    if (!authReady || !user || loading || !subscription) return;
+    // Only relevant once inside the authenticated app; don't interfere with
+    // the marketing site, /login, or the post-login redirect itself.
+    if (!location.pathname.startsWith('/app')) return;
+
+    checkedRef.current = true;
+
+    // Checked in order; the roles list mirrors AppRoutes' RoleRoute
+    // guards, so this never sends someone somewhere they can't open.
+    const checks = [
+      {
+        path: '/app/employees', roles: ['admin', 'hr', 'manager'],
+        hasDraft: () => {
+          const draft = loadDraft(employeeDraftKey(user.id));
+          return draft && isAddEmployeeFormMeaningful(draft);
+        },
+      },
+      {
+        path: '/app/employees', roles: ['admin', 'hr', 'manager'],
+        hasDraft: () => {
+          const draft = loadDraft(csvImportDraftKey(user.id));
+          return draft && isCsvImportDraftMeaningful(draft);
+        },
+      },
+      {
+        path: '/app/employees', roles: ['admin', 'hr', 'manager'],
+        hasDraft: () => hasResumableEditDraft(
+          editEmployeeDraftPrefix(user.id), subscription.enrolledEmployees || [], isEditEmployeeFormMeaningful,
+        ),
+      },
+      {
+        path: '/app/attendance', roles: null,
+        hasDraft: () => hasResumableEditDraft(
+          attendanceDraftPrefix(user.id), subscription.attendanceRecords || [], isAttendanceFormMeaningful,
+        ),
+      },
+      {
+        path: '/app/leave', roles: null,
+        hasDraft: () => hasResumableEditDraft(
+          leaveDraftPrefix(user.id), subscription.leaveRequests || [], isLeaveFormMeaningful,
+        ),
+      },
+      {
+        path: '/app/shifts', roles: ['admin', 'hr'],
+        hasDraft: () => hasResumableEditDraft(
+          shiftDraftPrefix(user.id), subscription.shifts || [], isShiftFormMeaningful,
+        ),
+      },
+      {
+        path: '/app/departments', roles: ['admin', 'hr'],
+        hasDraft: () => {
+          const draft = loadDraft(departmentDraftKey(user.id));
+          return draft && isDepartmentFormMeaningful(draft);
+        },
+      },
+    ];
+
+    for (const { path, roles, hasDraft } of checks) {
+      if (location.pathname === path) continue; // already there
+      if (roles && !roles.includes(user.role)) continue; // wouldn't have access anyway
+      if (hasDraft()) {
+        navigate(path, { replace: true });
+        return;
+      }
+    }
+  }, [authReady, user, loading, subscription, location.pathname, navigate]);
+
+  return null;
 }
 
 function AppRoutes() {
@@ -182,6 +316,7 @@ export default function App() {
             <FirstLoadGate>
               <AppRoutes />
             </FirstLoadGate>
+            <DraftResumeRedirect />
             <ConnectionIssueModal />
           </ToastProvider>
           </NotificationsProvider>

@@ -3,6 +3,11 @@ import { Clock, Plus, Trash2, Pencil, Users, QrCode, Wifi, MapPin, X, Download, 
 import { useSubscription } from '../context/SubscriptionContext';
 import { SectionHeader, Modal, InputField, EmptyState } from '../components/ui';
 import { useToast } from '../context/ToastContext';
+import { useAuth } from '../context/AuthContext';
+import { useFormDraft } from '../hooks/useFormDraft';
+import { useDraftRestoreOnMount } from '../hooks/useDraftRestoreOnMount';
+import DraftRestoredBanner from '../components/DraftRestoredBanner';
+import { shiftDraftPrefix, shiftDraftKey, isShiftFormMeaningful } from '../utils/draftKeys';
 import PlanGate from '../components/PlanGate';
 import { hhmmDiffMinutes } from '../utils/dateTime';
 
@@ -592,6 +597,7 @@ function ShiftFormFields({ form, setForm, departments = [], employees = [], allS
 // ── Main Content ──────────────────────────────────────────────────────────────
 function ShiftsContent() {
   const toast = useToast();
+  const { user } = useAuth();
   const { subscription, addShift, removeShift, updateShift, updateEmployee } = useSubscription();
   const shifts      = subscription?.shifts || [];
   const employees   = subscription?.enrolledEmployees || [];
@@ -601,6 +607,43 @@ function ShiftsContent() {
   const [editTarget, setEditTarget] = useState(null);
   const [qrTarget,   setQrTarget]   = useState(null);
   const [form,       setForm]       = useState(EMPTY_FORM);
+  const [draftRestored, setDraftRestored] = useState(false);
+
+  // On mount, look for whichever shift form (Add, or a specific Edit) was
+  // in progress when the page last reloaded. Both modals stay mounted
+  // regardless of `open`, but `editTarget` (needed to render the right
+  // one pre-filled) is only set by clicking Edit — so this scan has to
+  // happen before we know which shift, if any, that was.
+  useDraftRestoreOnMount({
+    prefix: shiftDraftPrefix(user?.id),
+    ready: !!subscription,
+    findById: (id) => shifts.find(s => String(s.id) === id),
+    onRestoreAdd: (data) => {
+      if (!isShiftFormMeaningful(data, null)) return false;
+      setForm(data.form);
+      setAddModal(true);
+      setDraftRestored(true);
+      toast('Restored the shift details you were entering before the page reloaded.', 'info');
+      return true;
+    },
+    onRestoreEdit: (target, data) => {
+      if (!isShiftFormMeaningful(data, target)) return false;
+      setForm(data.form);
+      setEditTarget(target);
+      setDraftRestored(true);
+      toast('Restored the changes you were making before the page reloaded.', 'info');
+      return true;
+    },
+  });
+
+  // Debounced-persist the shared form under whichever draft slot matches
+  // the current mode (the single "add" slot, or this specific shift's).
+  const draftKey = shiftDraftKey(user?.id, editTarget?.id);
+  const { clear: clearFormDraft } = useFormDraft(
+    draftKey,
+    { form },
+    { isMeaningful: (draft) => isShiftFormMeaningful(draft, editTarget || null) }
+  );
   // Neither handleAdd nor handleEdit disabled their button while the
   // underlying save was in flight, so a slow save (e.g. right after the tab
   // was backgrounded, waiting on withDbTimeout/DB_CALL_TIMEOUT_MS) gave zero
@@ -615,7 +658,7 @@ function ShiftsContent() {
     return employees.filter(e => e.shiftId && String(e.shiftId) === String(shiftId)).length;
   }
 
-  function openAdd() { setForm(EMPTY_FORM); setAddModal(true); }
+  function openAdd() { setForm(EMPTY_FORM); setAddModal(true); setDraftRestored(false); }
 
   function openEdit(shift) {
     setForm({
@@ -630,6 +673,7 @@ function ShiftsContent() {
       departments: shift.departments ? [...shift.departments] : [],
     });
     setEditTarget(shift);
+    setDraftRestored(false);
   }
 
   async function handleAdd() {
@@ -658,8 +702,10 @@ function ShiftsContent() {
       }, 0);
     }
     toast(`Shift "${form.name}" added`, 'success');
+    clearFormDraft();
     setForm(EMPTY_FORM);
     setAddModal(false);
+    setDraftRestored(false);
   }
 
   async function handleEdit() {
@@ -692,7 +738,9 @@ function ShiftsContent() {
         .forEach(e => updateEmployee(e.id, { shiftId: editTarget.id }));
     }
     toast(`Shift "${form.name}" updated`, 'success');
+    clearFormDraft();
     setEditTarget(null);
+    setDraftRestored(false);
   }
 
   async function handleRemove(shift) {
@@ -712,7 +760,7 @@ function ShiftsContent() {
 
   const modalFooter = (onPrimary, label) => (
     <>
-      <button className="btn-secondary" onClick={() => { setAddModal(false); setEditTarget(null); }} disabled={isSaving}>Cancel</button>
+      <button className="btn-secondary" onClick={() => { clearFormDraft(); setAddModal(false); setEditTarget(null); setDraftRestored(false); }} disabled={isSaving}>Cancel</button>
       <button className="btn-primary" onClick={onPrimary} disabled={isSaving}>{isSaving ? 'Saving…' : label}</button>
     </>
   );
@@ -817,9 +865,15 @@ function ShiftsContent() {
       )}
 
       {/* Add modal */}
-      <Modal open={addModal} onClose={() => setAddModal(false)} title="Add Shift" width="max-w-sm"
+      <Modal open={addModal} onClose={() => { clearFormDraft(); setAddModal(false); setDraftRestored(false); }} title="Add Shift" width="max-w-sm"
         footer={modalFooter(handleAdd, 'Add Shift')}
       >
+        {draftRestored && !editTarget && (
+          <DraftRestoredBanner
+            className="mb-3"
+            onDiscard={() => { clearFormDraft(); setForm(EMPTY_FORM); setDraftRestored(false); }}
+          />
+        )}
         <ShiftFormFields
           form={form} setForm={setForm}
           departments={departments}
@@ -829,9 +883,16 @@ function ShiftsContent() {
       </Modal>
 
       {/* Edit modal */}
-      <Modal open={!!editTarget} onClose={() => setEditTarget(null)} title="Edit Shift" width="max-w-sm"
+      <Modal open={!!editTarget} onClose={() => { clearFormDraft(); setEditTarget(null); setDraftRestored(false); }} title="Edit Shift" width="max-w-sm"
         footer={modalFooter(handleEdit, 'Save Changes')}
       >
+        {draftRestored && editTarget && (
+          <DraftRestoredBanner
+            className="mb-3"
+            message="Restored unsaved changes from before the page reloaded."
+            onDiscard={() => { clearFormDraft(); openEdit(editTarget); }}
+          />
+        )}
         <ShiftFormFields
           form={form} setForm={setForm}
           departments={departments}

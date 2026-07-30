@@ -1,4 +1,4 @@
-import { X, Loader2, Search, AlertCircle } from 'lucide-react';
+import { Loader2, Search, AlertCircle } from 'lucide-react';
 
 // ─── Status Badge ───────────────────────────────────────────────────────────
 export function StatusBadge({ status }) {
@@ -50,13 +50,10 @@ export function Spinner({ size = 16, className = '' }) {
 export function Modal({ open, onClose, title, children, width = 'max-w-lg', footer }) {
   if (!open) return null;
   return (
-    <div className="modal-overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
+    <div className="modal-overlay">
       <div className={`modal ${width} animate-modal`}>
         <div className="flex items-center justify-between px-6 py-4 border-b border-surface-200">
           <h2 className="text-base font-semibold text-ink-900">{title}</h2>
-          <button onClick={onClose} className="btn-ghost p-1.5 rounded-lg">
-            <X size={16} />
-          </button>
         </div>
         <div className="px-6 py-5">{children}</div>
         {footer && <div className="flex items-center justify-end gap-2 px-6 py-4 border-t border-surface-200 bg-surface-50 rounded-b-2xl">{footer}</div>}

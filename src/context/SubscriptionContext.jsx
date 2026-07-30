@@ -375,6 +375,14 @@ export function SubscriptionProvider({ children }) {
         leaveTypes: [],
       },
       createdAt: new Date().toISOString(),
+      // Distinguishes "just signed up, still on /onboard" from "onboarding
+      // finished" — a subscription row exists (and is otherwise fully
+      // usable) the moment subscribe() runs, well before the admin has
+      // enrolled anyone or hit "Finish setup". Without this flag, nothing
+      // tells PrivateRoute apart from a subscription that's actually ready
+      // to be used, so a reload that ever lands the user on /app/* mid-
+      // onboarding has no way to send them back to finish it.
+      onboardingComplete: false,
       status: isTrial ? 'trialing' : 'active',
       trialEndsAt: isTrial ? new Date(Date.now() + 14*24*60*60*1000).toISOString() : null,
       // Marks this account as having consumed its one-time free trial. Set
@@ -524,6 +532,12 @@ export function SubscriptionProvider({ children }) {
     }
     return { ...prev, planId, status: 'active' };
   }), [update]);
+  // Marks onboarding as finished so PrivateRoute (App.jsx) stops bouncing
+  // this subscription back to /onboard. Idempotent — safe to call again
+  // even if "Finish setup" is somehow triggered twice.
+  const completeOnboarding = useCallback(() => update(prev => (
+    prev.onboardingComplete ? prev : { ...prev, onboardingComplete: true }
+  )), [update]);
   const clearSubscription  = useCallback(()        => setSubscription(null), []);  // eslint-disable-line
   const updateSettings     = useCallback((upd)     => update(prev => ({ ...prev, settings: { ...prev.settings, ...upd } })), [update]);
 
@@ -779,7 +793,7 @@ export function SubscriptionProvider({ children }) {
       setPendingEmployeesExternal: setPendingEmployees,
       subscribe, enrollEmployee, removeEmployee, updateEmployee,
       submitRegistration, editPendingRegistration, approveEmployee, rejectEmployee,
-      cancelSubscription, upgradePlan, clearSubscription, updateSettings,
+      cancelSubscription, upgradePlan, clearSubscription, updateSettings, completeOnboarding,
       addAttendanceRecord, updateAttendanceRecord,
       addLeaveRequest, updateLeaveRequest,
       addLeaveType, updateLeaveType, removeLeaveType,

@@ -8,9 +8,13 @@ import { useSubscription } from '../../context/SubscriptionContext';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { getSubscription } from '../../utils/db';
+import { generateEmployeeCode, downloadCSVTemplate, parseCSV } from '../../utils/csvImport';
+import { onboardingEmployeeDraftKey, isAddEmployeeFormMeaningful } from '../../utils/employeeDraft';
+import { useFormDraft } from '../../hooks/useFormDraft';
 import { InputField, Avatar, Spinner } from '../../components/ui';
 import LoadingScreen from '../../components/LoadingScreen';
 import TransitionLoadingScreen from '../../components/TransitionLoadingScreen';
+import DraftRestoredBanner from '../../components/DraftRestoredBanner';
 
 const DEPARTMENTS_SUGGESTIONS = [
   'Engineering', 'Human Resources', 'Finance', 'Operations',
@@ -20,74 +24,6 @@ const ROLES_SUGGESTIONS = [
   'Manager', 'Team Lead', 'Senior Engineer', 'Engineer',
   'Analyst', 'Specialist', 'Associate', 'Coordinator',
 ];
-
-/* ── Unique ID generator ── */
-function generateEmployeeCode() {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  const rand = Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
-  const tail = String(Date.now()).slice(-3);
-  return `ERJ-${rand}${tail}`;
-}
-
-/* ── CSV template download ── */
-function downloadCSVTemplate() {
-  const headers = ['firstName', 'middleName', 'lastName', 'suffix', 'email', 'phone', 'role', 'department', 'employeeCode'];
-  const examples = [
-    ['Maria', 'Cristina', 'Santos', '', 'm.santos@company.com', '+639123456789', 'Engineer', 'Engineering', 'ERJ-SAMPLE1'],
-    ['Jose', '', 'Reyes', 'Jr.', 'j.reyes@company.com', '+639179876543', 'Team Lead', 'Operations', ''],
-  ];
-  const rows = [headers, ...examples].map(r => r.map(v => `"${v}"`).join(',')).join('\n');
-  const blob = new Blob([rows], { type: 'text/csv' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = 'employee_import_template.csv';
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
-/* ── Parse uploaded CSV ── */
-function parseCSV(text) {
-  const lines = text.trim().split('\n').filter(Boolean);
-  if (lines.length < 2) return { employees: [], errors: ['CSV has no data rows.'] };
-
-  // Strip BOM and normalize quotes
-  const clean = s => s.replace(/^\uFEFF/, '').replace(/^"|"$/g, '').trim();
-
-  const headers = lines[0].split(',').map(clean).map(h => h.toLowerCase());
-  const required = ['firstname', 'lastname', 'email'];
-  const missing = required.filter(r => !headers.includes(r));
-  if (missing.length) return { employees: [], errors: [`Missing required columns: ${missing.join(', ')}. Download the template to see the correct format.`] };
-
-  const employees = [];
-  const errors = [];
-
-  lines.slice(1).forEach((line, i) => {
-    const row = line.split(',').map(clean);
-    const obj = {};
-    headers.forEach((h, idx) => { obj[h] = row[idx] || ''; });
-
-    const rowNum = i + 2;
-    if (!obj.firstname) { errors.push(`Row ${rowNum}: First name is required`); return; }
-    if (!obj.lastname) { errors.push(`Row ${rowNum}: Last name is required`); return; }
-    if (!obj.email?.includes('@')) { errors.push(`Row ${rowNum}: Valid email required`); return; }
-
-    employees.push({
-      firstName: obj.firstname,
-      middleName: obj.middlename || '',
-      lastName: obj.lastname,
-      suffix: obj.suffix || '',
-      email: obj.email,
-      phone: obj.phone || '',
-      role: obj.role || '',
-      department: obj.department || '',
-      joinDate: obj.joindate || new Date().toISOString().split('T')[0],
-      employeeCode: obj.employeecode?.toUpperCase() || generateEmployeeCode(),
-    });
-  });
-
-  return { employees, errors };
-}
 
 /* ── Phone helpers ── */
 function toLocalPhone(full) {
@@ -132,6 +68,8 @@ function PhoneField({ value, onChange, label = 'Phone' }) {
    Employee form
 ───────────────────────────────────────────── */
 function EmployeeForm({ onAdd, seatsAvailable, currentPlan, existingCodes, departments }) {
+  const { user } = useAuth();
+  const toast = useToast();
   const activeDepts = departments.length > 0 ? departments : DEPARTMENTS_SUGGESTIONS;
   const [form, setForm] = useState({
     firstName: '', middleName: '', lastName: '', suffix: '', email: '', phone: '',
@@ -141,12 +79,47 @@ function EmployeeForm({ onAdd, seatsAvailable, currentPlan, existingCodes, depar
   });
   const [idMode, setIdMode] = useState('manual');
   const [errors, setErrors] = useState({});
+  const [draftRestored, setDraftRestored] = useState(false);
 
   useEffect(() => {
     if (departments.length > 0 && !form.department) {
       setForm(p => ({ ...p, department: departments[0] }));
     }
   }, [departments]);
+
+  // ── Draft persistence ────────────────────────────────────────────
+  // Without this, a reload mid-onboarding (e.g. the admin switches tabs to
+  // fill in the downloaded CSV template, and the browser reclaims/reloads
+  // this tab in the background) silently wiped out whatever they'd already
+  // typed into this form — same failure mode useFormDraft already fixes
+  // for the Employees page's own Add Employee modal.
+  const draftKey = onboardingEmployeeDraftKey(user?.id);
+  const { clear: clearFormDraft } = useFormDraft(
+    draftKey,
+    { form, idMode },
+    {
+      isMeaningful: isAddEmployeeFormMeaningful,
+      onRestore: (draft) => {
+        setForm(prev => ({ ...prev, ...draft.form }));
+        if (draft.idMode) setIdMode(draft.idMode);
+        setDraftRestored(true);
+        toast('Restored the employee details you were entering before the page reloaded.', 'info');
+      },
+    }
+  );
+
+  function discardDraft() {
+    clearFormDraft();
+    setForm(p => ({
+      firstName: '', middleName: '', lastName: '', suffix: '', email: '', phone: '',
+      role: '', department: activeDepts[0] || '',
+      joinDate: new Date().toISOString().split('T')[0],
+      employeeCode: '',
+    }));
+    setIdMode('manual');
+    setErrors({});
+    setDraftRestored(false);
+  }
 
   const f = k => v => setForm(p => ({ ...p, [k]: v }));
 
@@ -175,6 +148,7 @@ function EmployeeForm({ onAdd, seatsAvailable, currentPlan, existingCodes, depar
     if (!validate()) return;
     if (seatsAvailable === 0) return;
     onAdd({ ...form, employeeCode: form.employeeCode.trim().toUpperCase() });
+    clearFormDraft();
     setForm({
       firstName: '', middleName: '', lastName: '', suffix: '', email: '', phone: '',
       role: '', department: activeDepts[0] || '',
@@ -183,6 +157,7 @@ function EmployeeForm({ onAdd, seatsAvailable, currentPlan, existingCodes, depar
     });
     setIdMode('manual');
     setErrors({});
+    setDraftRestored(false);
   }
 
   return (
@@ -191,6 +166,13 @@ function EmployeeForm({ onAdd, seatsAvailable, currentPlan, existingCodes, depar
         <UserPlus size={15} className="text-brand-600" />
         <p className="text-sm font-semibold text-ink-900">Add an employee</p>
       </div>
+
+      {draftRestored && (
+        <DraftRestoredBanner
+          message="Restored unsaved details from before the page reloaded."
+          onDiscard={discardDraft}
+        />
+      )}
 
       <div className="grid grid-cols-2 gap-3">
         <InputField label="First Name" value={form.firstName} onChange={f('firstName')} placeholder="Maria" error={errors.firstName} />
@@ -295,7 +277,7 @@ export default function OnboardingPage() {
   const { commitLogin } = useAuth();
   const {
     subscription, loading, currentPlan, seatsUsed, seatsAvailable,
-    enrollEmployee, removeEmployee,
+    enrollEmployee, removeEmployee, completeOnboarding,
   } = useSubscription();
   const [saving, setSaving] = useState(false);
   const [transitioning, setTransitioning] = useState(false);
@@ -318,6 +300,10 @@ export default function OnboardingPage() {
   useEffect(() => {
     if (!loading && !subscription) navigate('/pricing');
   }, [subscription, loading, navigate]);
+
+  useEffect(() => {
+    if (subscription?.onboardingComplete) navigate('/app/dashboard', { replace: true });
+  }, [subscription?.onboardingComplete, navigate]);
 
   if (loading) return <LoadingScreen label="Setting up your workspace…" />;
   if (!subscription) return null;
@@ -380,6 +366,9 @@ export default function OnboardingPage() {
     // hit PGRST116 ("0 rows"), leaving the app stuck in a loading loop —
     // which is the exact bug this fixes.
     const confirmReady = getSubscription(subscription.subscriptionId);
+    // Marks this subscription as done with onboarding so PrivateRoute no
+    // longer bounces it back to /onboard on future visits to /app/*.
+    try { await completeOnboarding(); } catch (err) { console.warn('[Onboarding] completeOnboarding failed:', err.message); }
     setSaving(false);
     toast(`Workspace ready! ${enrolled.length > 0 ? enrolled.length + ' employees enrolled. ' : ''}Taking you to your dashboard.`, 'success');
     setReadyPromise(confirmReady);

@@ -10,6 +10,10 @@ import { fmt } from '../utils/dateTime';
 import { StatusBadge, Avatar, SearchInput, SelectField, SectionHeader, EmptyState, Modal, InputField } from '../components/ui';
 import { useToast } from '../context/ToastContext';
 import { useAuth } from '../context/AuthContext';
+import { useFormDraft } from '../hooks/useFormDraft';
+import { leaveDraftPrefix, leaveDraftKey, isLeaveFormMeaningful } from '../utils/draftKeys';
+import { useDraftRestoreOnMount } from '../hooks/useDraftRestoreOnMount';
+import DraftRestoredBanner from '../components/DraftRestoredBanner';
 
 function exportLeaveCSV(list) {
   const headers = ['Employee Code', 'First Name', 'Last Name', 'Department', 'Leave Type', 'Start Date', 'End Date', 'Leave Dates', 'Days', 'Reason', 'Status', 'Submitted'];
@@ -61,7 +65,7 @@ function rangeToDates(start, end) {
 
 export default function LeavePage() {
   const toast = useToast();
-  const { can } = useAuth();
+  const { can, user } = useAuth();
   const {
     subscription, addLeaveRequest, updateLeaveRequest,
     addLeaveType, updateLeaveType, removeLeaveType, setEmployeeLeaveBalance,
@@ -83,6 +87,13 @@ export default function LeavePage() {
   const [cancelTarget, setCancelTarget] = useState(null);
   const [typesModal, setTypesModal] = useState(false);
   const [balanceTarget, setBalanceTarget] = useState(null);
+
+  useDraftRestoreOnMount({
+    prefix: leaveDraftPrefix(user?.id),
+    ready: leaveRequests.length > 0,
+    findById: (id) => leaveRequests.find(r => String(r.id) === id),
+    onRestoreEdit: (target) => { setEditTarget(target); return true; },
+  });
 
   const isAdmin = can('edit_all');
   const showActions = can('approve_leave') || can('edit_all');
@@ -369,6 +380,7 @@ export default function LeavePage() {
         employees={employees}
         leaveTypes={leaveTypes}
         title="New Leave Request"
+        onDraftRestored={() => setAddModal(true)}
       />
 
       {/* Edit Leave Request Modal */}
@@ -538,9 +550,12 @@ function BalancesTab({ employees, leaveTypes, isAdmin, onEdit }) {
   );
 }
 
-function LeaveModal({ open, onClose, onSave, employees, leaveTypes, title, initial }) {
+function LeaveModal({ open, onClose, onSave, employees, leaveTypes, title, initial, onDraftRestored }) {
   const defaultType = leaveTypes[0]?.name ?? '';
-  const [form, setForm] = useState(
+  const toast = useToast();
+  const { user } = useAuth();
+  const [draftRestored, setDraftRestored] = useState(false);
+  const blankForm = () => (
     initial
       ? {
           employeeId: initial.employeeId,
@@ -559,7 +574,36 @@ function LeaveModal({ open, onClose, onSave, employees, leaveTypes, title, initi
           reason: '',
         }
   );
+  const [form, setForm] = useState(blankForm);
   const f = k => v => setForm(p => ({ ...p, [k]: v }));
+
+  // ── Draft persistence ────────────────────────────────────────────
+  const draftKey = leaveDraftKey(user?.id, initial?.id);
+  const { clear: clearFormDraft } = useFormDraft(
+    draftKey,
+    { form },
+    {
+      isMeaningful: (draft) => isLeaveFormMeaningful(draft, initial || null),
+      onOpen: onDraftRestored,
+      onRestore: (draft) => {
+        setForm(prev => ({ ...prev, ...draft.form }));
+        setDraftRestored(true);
+        toast(`Restored the ${initial ? 'changes' : 'request details'} you were entering before the page reloaded.`, 'info');
+      },
+    }
+  );
+
+  function discardDraft() {
+    clearFormDraft();
+    setForm(blankForm());
+    setDraftRestored(false);
+  }
+
+  function handleClose() {
+    clearFormDraft();
+    setDraftRestored(false);
+    onClose();
+  }
 
   const selectedEmployee = employees.find(e => String(e.id) === String(form.employeeId));
   const balance = selectedEmployee?.leaveBalances?.[form.leaveType] ?? 0;
@@ -570,13 +614,15 @@ function LeaveModal({ open, onClose, onSave, employees, leaveTypes, title, initi
     if (!form.employeeId || form.dates.length === 0) return;
     const sorted = [...form.dates].sort();
     onSave({ ...form, dates: sorted, startDate: sorted[0], endDate: sorted[sorted.length - 1] });
+    clearFormDraft();
+    setDraftRestored(false);
   }
 
   return (
-    <Modal open={open} onClose={onClose} title={title} width="max-w-md"
+    <Modal open={open} onClose={handleClose} title={title} width="max-w-md"
       footer={
         <>
-          <button className="btn-secondary" onClick={onClose}>Cancel</button>
+          <button className="btn-secondary" onClick={handleClose}>Cancel</button>
           <button className="btn-primary" onClick={handleSubmit} disabled={!form.employeeId || form.dates.length === 0}>
             {initial ? 'Save Changes' : 'Submit'}
           </button>
@@ -584,6 +630,9 @@ function LeaveModal({ open, onClose, onSave, employees, leaveTypes, title, initi
       }
     >
       <div className="space-y-3">
+        {draftRestored && (
+          <DraftRestoredBanner onDiscard={discardDraft} />
+        )}
         <SelectField label="Employee" value={form.employeeId} onChange={f('employeeId')}
           options={[{ value: '', label: 'Select employee…' }, ...employees.map(e => ({ value: e.id, label: `${e.firstName} ${e.lastName}` }))]}
         />

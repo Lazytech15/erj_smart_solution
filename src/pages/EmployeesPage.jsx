@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
+import { useState, useMemo, useEffect, useRef, useCallback, Fragment } from 'react';
 import { UserPlus, Pencil, Trash2, Eye, EyeOff, ToggleLeft, ToggleRight, RefreshCw, Wand2, PenLine, BarChart2, Clock, CheckCircle, XCircle, AlertTriangle, TrendingUp, ClipboardCopy, UserCheck, Link, Camera, Upload, X as XIcon } from 'lucide-react';
 import { useLocation } from 'react-router-dom';
 import { useSubscription } from '../context/SubscriptionContext';
@@ -7,10 +7,16 @@ import { Avatar, StatusBadge, SearchInput, SelectField, SectionHeader, EmptyStat
 import { useToast } from '../context/ToastContext';
 import { useAuth } from '../context/AuthContext';
 import { supabase } from '../utils/supabase';
+import { useFormDraft } from '../hooks/useFormDraft';
+import { employeeDraftKey, isAddEmployeeFormMeaningful, csvImportDraftKey, isCsvImportDraftMeaningful } from '../utils/employeeDraft';
+import { editEmployeeDraftPrefix, editEmployeeDraftKey, isEditEmployeeFormMeaningful } from '../utils/draftKeys';
+import { useDraftRestoreOnMount } from '../hooks/useDraftRestoreOnMount';
+import DraftRestoredBanner from '../components/DraftRestoredBanner';
+import { downloadCSVTemplate, parseCSV } from '../utils/csvImport';
 
 export default function EmployeesPage() {
   const toast = useToast();
-  const { can } = useAuth();
+  const { can, user } = useAuth();
   const location = useLocation();
   const pendingSectionRef = useRef(null);
   const [pendingHighlight, setPendingHighlight] = useState(false);
@@ -40,6 +46,7 @@ export default function EmployeesPage() {
   const [status, setStatus] = useState('all');
   const [view, setView] = useState('table');
   const [addModal, setAddModal] = useState(false);
+  const [csvModal, setCsvModal] = useState(false);
   const [selected, setSelected] = useState(null);
   const [editTarget, setEditTarget] = useState(null);
   const [editModal, setEditModal] = useState(false);
@@ -50,6 +57,21 @@ export default function EmployeesPage() {
   const [showRegisterLink, setShowRegisterLink] = useState(false);
   const [sortKey, setSortKey] = useState('lastName');
   const [sortDir, setSortDir] = useState('asc');
+
+  // On mount, look for a saved Edit Employee draft (there's no editTarget
+  // yet to key off of at this point — that's the whole reason this needs
+  // a prefix scan instead of the usual per-field useFormDraft restore).
+  useDraftRestoreOnMount({
+    prefix: editEmployeeDraftPrefix(user?.id),
+    ready: EMPLOYEES.length > 0,
+    findById: (id) => EMPLOYEES.find(e => String(e.id) === id),
+    onRestoreEdit: (target, data) => {
+      if (!isEditEmployeeFormMeaningful(data, target)) return false;
+      setEditTarget(target);
+      setEditModal(true);
+      return true;
+    },
+  });
 
   function toggleSort(key) {
     if (sortKey === key) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
@@ -199,6 +221,9 @@ export default function EmployeesPage() {
               >
                 <Link size={13} /> Registration Link
               </button>
+              <button className="btn-secondary btn-sm" onClick={() => setCsvModal(true)}>
+                <Upload size={13} /> Import CSV
+              </button>
               <button className="btn-primary btn-sm" onClick={() => setAddModal(true)}>
                 <UserPlus size={13} /> Add Employee
               </button>
@@ -279,9 +304,14 @@ export default function EmployeesPage() {
           <p className="text-sm font-semibold text-ink-900 mb-1">No employees yet</p>
           <p className="text-xs text-ink-400 mb-4">Add your first employee to get started.</p>
           {can('edit_all') && (
-            <button className="btn-primary btn-sm" onClick={() => setAddModal(true)}>
-              <UserPlus size={13} /> Add Employee
-            </button>
+            <div className="flex items-center gap-2">
+              <button className="btn-secondary btn-sm" onClick={() => setCsvModal(true)}>
+                <Upload size={13} /> Import CSV
+              </button>
+              <button className="btn-primary btn-sm" onClick={() => setAddModal(true)}>
+                <UserPlus size={13} /> Add Employee
+              </button>
+            </div>
           )}
         </div>
       ) : (
@@ -469,6 +499,17 @@ export default function EmployeesPage() {
         shifts={SHIFTS}
         seatsAvailable={seatsAvailable}
         currentPlan={currentPlan}
+        onDraftRestored={() => setAddModal(true)}
+      />
+
+      {/* CSV Import Modal */}
+      <CSVImportModal
+        open={csvModal}
+        onClose={() => setCsvModal(false)}
+        enrolled={EMPLOYEES}
+        enrollEmployee={enrollEmployee}
+        seatsAvailable={seatsAvailable}
+        onDraftRestored={() => setCsvModal(true)}
       />
 
       {/* Analytics Modal */}
@@ -526,6 +567,18 @@ export default function EmployeesPage() {
 
 const ROLES_SUGGESTIONS = ['Manager','Team Lead','Senior Engineer','Engineer','Analyst','Specialist','Associate','Coordinator'];
 
+/** Blank slate for the Add Employee form — reused on mount, reset, and discard. */
+function blankEmployeeForm(departments) {
+  return {
+    firstName: '', middleName: '', lastName: '', suffix: '', email: '', phone: '',
+    role: '', department: departments[0] || '',
+    joinDate: new Date().toISOString().split('T')[0],
+    employeeCode: '',
+    shiftId: '',
+    password: '',
+  };
+}
+
 /* ── Phone helpers ── */
 function toLocalPhone(full) {
   // Strip +63 prefix if present, return up to 10 digits
@@ -574,20 +627,53 @@ function generateEmployeeCode() {
   return `ERJ-${rand}${tail}`;
 }
 
-function AddEmployeeModal({ open, onClose, onSave, departments, shifts, seatsAvailable, currentPlan }) {
+function AddEmployeeModal({ open, onClose, onSave, departments, shifts, seatsAvailable, currentPlan, onDraftRestored }) {
   const uid = 'add';
-  const [form, setForm] = useState({
-    firstName: '', middleName: '', lastName: '', suffix: '', email: '', phone: '',
-    role: '', department: departments[0] || '',
-    joinDate: new Date().toISOString().split('T')[0],
-    employeeCode: '',
-    shiftId: '',
-    password: '',
-  });
+  const toast = useToast();
+  const { user } = useAuth();
+  const [form, setForm] = useState(() => blankEmployeeForm(departments));
   const [idMode, setIdMode] = useState('manual');
   const [showPw, setShowPw] = useState(false);
   const [errors, setErrors] = useState({});
+  const [draftRestored, setDraftRestored] = useState(false);
   const f = (k) => (v) => setForm(prev => ({ ...prev, [k]: v }));
+
+  // ── Draft persistence ────────────────────────────────────────────
+  // Scoped per logged-in user so a shared/kiosk browser doesn't surface
+  // one admin's half-typed employee to another. Password is deliberately
+  // left out of what's persisted — it never gets written to localStorage.
+  const draftKey = employeeDraftKey(user?.id);
+  const { clear: clearFormDraft } = useFormDraft(
+    draftKey,
+    { form: { ...form, password: '' }, idMode },
+    {
+      isMeaningful: isAddEmployeeFormMeaningful,
+      onOpen: onDraftRestored,
+      onRestore: (draft) => {
+        setForm(prev => ({ ...prev, ...draft.form, password: '' }));
+        if (draft.idMode) setIdMode(draft.idMode);
+        setDraftRestored(true);
+        toast('Restored the employee details you were entering before the page reloaded. Re-enter the password if you set one.', 'info');
+      },
+    }
+  );
+
+  function discardDraft() {
+    clearFormDraft();
+    setForm(blankEmployeeForm(departments));
+    setIdMode('manual');
+    setErrors({});
+    setDraftRestored(false);
+  }
+
+  function handleClose() {
+    // Cancel / X / backdrop click all mean "I don't want to keep this" —
+    // clear the draft too, so a later reload doesn't bring back a form the
+    // user already dismissed on purpose.
+    clearFormDraft();
+    setDraftRestored(false);
+    onClose();
+  }
 
   function regenerate() { setForm(p => ({ ...p, employeeCode: generateEmployeeCode() })); }
 
@@ -621,17 +707,19 @@ function AddEmployeeModal({ open, onClose, onSave, departments, shifts, seatsAva
     if (!validate()) return;
     const username = form.email.split('@')[0].toLowerCase().replace(/[^a-z0-9._-]/g, '');
     onSave({ ...form, employeeCode: form.employeeCode.trim().toUpperCase(), username, password: form.password });
-    setForm({ firstName: '', middleName: '', lastName: '', suffix: '', email: '', phone: '', role: '', department: departments[0] || '', joinDate: new Date().toISOString().split('T')[0], employeeCode: '', shiftId: '', password: '' });
+    clearFormDraft();
+    setForm(blankEmployeeForm(departments));
     setIdMode('manual');
     setShowPw(false);
     setErrors({});
+    setDraftRestored(false);
   }
 
   return (
-    <Modal open={open} onClose={onClose} title="Add New Employee" width="max-w-xl"
+    <Modal open={open} onClose={handleClose} title="Add New Employee" width="max-w-xl"
       footer={
         <>
-          <button className="btn-secondary" onClick={onClose}>Cancel</button>
+          <button className="btn-secondary" onClick={handleClose}>Cancel</button>
           <button className="btn-primary" onClick={handleSave} disabled={seatsAvailable === 0}>Add Employee</button>
         </>
       }
@@ -641,6 +729,12 @@ function AddEmployeeModal({ open, onClose, onSave, departments, shifts, seatsAva
           <div className="p-3 rounded-lg bg-warning-50 border border-warning-200 text-xs text-warning-700">
             Seat limit reached for {currentPlan?.name}. Upgrade your plan to add more employees.
           </div>
+        )}
+        {draftRestored && (
+          <DraftRestoredBanner
+            message="Restored unsaved details from before the page reloaded."
+            onDiscard={discardDraft}
+          />
         )}
         <div className="grid grid-cols-2 gap-3">
           <InputField label="First Name" value={form.firstName} onChange={f('firstName')} placeholder="Maria" error={errors.firstName} />
@@ -840,7 +934,54 @@ function EditEmployeeModal({ open, onClose, onSave, departments, shifts, employe
   const [photoFile, setPhotoFile] = useState(null);
   const [photoUploading, setPhotoUploading] = useState(false);
   const [photoError, setPhotoError] = useState('');
+  const [draftRestored, setDraftRestored] = useState(false);
+  const toast = useToast();
+  const { user } = useAuth();
   const f = (k) => (v) => setForm(prev => ({ ...prev, [k]: v }));
+
+  // ── Draft persistence ────────────────────────────────────────────
+  // Password is never persisted. Photo edits aren't either — a File
+  // object/object URL can't survive a reload, so a re-selected photo is
+  // simply lost and the user re-attaches it; everything else (name,
+  // contact info, role, shift, etc.) comes back.
+  const draftKey = editEmployeeDraftKey(user?.id, employee.id);
+  const { clear: clearFormDraft } = useFormDraft(
+    draftKey,
+    { form: { ...form, password: '' } },
+    {
+      isMeaningful: (draft) => isEditEmployeeFormMeaningful(draft, employee),
+      onRestore: (draft) => {
+        setForm(prev => ({ ...prev, ...draft.form, password: '' }));
+        setDraftRestored(true);
+        toast('Restored the changes you were making before the page reloaded.', 'info');
+      },
+    }
+  );
+
+  function discardDraft() {
+    clearFormDraft();
+    setForm({
+      firstName: employee.firstName,
+      middleName: employee.middleName || '',
+      lastName: employee.lastName,
+      suffix: employee.suffix || '',
+      email: employee.email,
+      phone: employee.phone || '',
+      role: employee.role,
+      department: employee.department,
+      joinDate: employee.joinDate,
+      shiftId: employee.shiftId || '',
+      username: employee.username || '',
+      password: '',
+    });
+    setDraftRestored(false);
+  }
+
+  function handleClose() {
+    clearFormDraft();
+    setDraftRestored(false);
+    onClose();
+  }
 
   async function handlePhotoChange(e) {
     const file = e.target.files?.[0];
@@ -903,13 +1044,15 @@ function EditEmployeeModal({ open, onClose, onSave, departments, shifts, employe
 
     const username = form.email.split('@')[0].toLowerCase().replace(/[^a-z0-9._-]/g, '');
     onSave({ ...form, username, profilePhotoUrl });
+    clearFormDraft();
+    setDraftRestored(false);
   }
 
   return (
-    <Modal open={open} onClose={onClose} title="Edit Employee" width="max-w-xl"
+    <Modal open={open} onClose={handleClose} title="Edit Employee" width="max-w-xl"
       footer={
         <>
-          <button className="btn-secondary" onClick={onClose} disabled={photoUploading}>Cancel</button>
+          <button className="btn-secondary" onClick={handleClose} disabled={photoUploading}>Cancel</button>
           <button className="btn-primary" onClick={handleSave} disabled={photoUploading}>
             {photoUploading ? 'Uploading…' : 'Save Changes'}
           </button>
@@ -917,6 +1060,12 @@ function EditEmployeeModal({ open, onClose, onSave, departments, shifts, employe
       }
     >
       <div className="space-y-3">
+        {draftRestored && (
+          <DraftRestoredBanner
+            message="Restored unsaved changes from before the page reloaded."
+            onDiscard={discardDraft}
+          />
+        )}
 
         {/* ── Profile Photo Upload ── */}
         <div>
@@ -1353,6 +1502,357 @@ function PendingConfirmModal({ pending, action, onClose, onEdit, onConfirm, seat
             : 'This will permanently remove this registration request. The applicant will need to re-submit if rejected by mistake.'}
         </p>
       </div>
+    </Modal>
+  );
+}
+
+/* ─────────────────────────────────────────────
+   CSV Import Modal
+   Bulk-add employees from a CSV file, using the same template/parsing
+   rules as the onboarding page's bulk import (see utils/csvImport.js).
+
+   Two stages:
+   1. "upload" — drag & drop / file picker + template + column reference.
+   2. "preview" — an editable table of every parsed row so the admin can
+      fix typos, drop bad rows, or clear everything and start over
+      *before* anything is actually saved to Supabase (previously this
+      modal enrolled employees immediately on upload, with no chance to
+      catch a wrong column or a typo'd email first).
+───────────────────────────────────────────── */
+let csvRowSeq = 0;
+function nextRowId() { csvRowSeq += 1; return `csvrow_${csvRowSeq}`; }
+
+/** Per-row validation — mirrors parseCSV's own required-field rules. */
+function rowErrors(row) {
+  const errs = [];
+  if (!row.firstName?.trim()) errs.push('First name required');
+  if (!row.lastName?.trim()) errs.push('Last name required');
+  if (!row.email?.trim() || !row.email.includes('@')) errs.push('Valid email required');
+  return errs;
+}
+
+function CSVImportModal({ open, onClose, enrolled, enrollEmployee, seatsAvailable, onDraftRestored }) {
+  const toast = useToast();
+  const { user } = useAuth();
+  const [stage, setStage] = useState('upload'); // 'upload' | 'preview'
+  const [rows, setRows] = useState([]);
+  const [parseErrors, setParseErrors] = useState([]);
+  const [dragOver, setDragOver] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [draftRestored, setDraftRestored] = useState(false);
+
+  // ── Draft persistence ────────────────────────────────────────────
+  // Same reasoning as the Add Employee modal's draft: a reload while the
+  // admin is midway through reviewing/editing an uploaded CSV (fixing a
+  // typo, deleting a bad row) would otherwise silently throw the whole
+  // batch away and force a re-upload from scratch.
+  const draftKey = csvImportDraftKey(user?.id);
+  const { clear: clearFormDraft } = useFormDraft(
+    draftKey,
+    { rows, parseErrors },
+    {
+      isMeaningful: isCsvImportDraftMeaningful,
+      onOpen: onDraftRestored,
+      onRestore: (draft) => {
+        setRows(draft.rows || []);
+        setParseErrors(draft.parseErrors || []);
+        setStage((draft.rows || []).length > 0 ? 'preview' : 'upload');
+        setDraftRestored(true);
+        toast('Restored the CSV import you were reviewing before the page reloaded.', 'info');
+      },
+    }
+  );
+
+  function reset() {
+    setStage('upload');
+    setRows([]);
+    setParseErrors([]);
+    setDragOver(false);
+    setImporting(false);
+    setDraftRestored(false);
+  }
+
+  function handleClose() {
+    // Closing without saving means "never mind" — clear the draft too, so
+    // a later reload doesn't bring back an import the admin already
+    // dismissed on purpose.
+    clearFormDraft();
+    reset();
+    onClose();
+  }
+
+  function loadFile(file) {
+    if (!file) return;
+    if (!/\.csv$/i.test(file.name) && file.type !== 'text/csv') {
+      toast('Please upload a .csv file.', 'error');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const { employees, errors } = parseCSV(ev.target.result);
+      setParseErrors(errors);
+      setRows(employees.map(emp => ({ ...emp, _id: nextRowId() })));
+      setStage('preview');
+    };
+    reader.readAsText(file);
+  }
+
+  function handleFileInput(e) {
+    loadFile(e.target.files?.[0]);
+    e.target.value = ''; // reset so the same file can be re-uploaded
+  }
+
+  function handleDrop(e) {
+    e.preventDefault();
+    setDragOver(false);
+    loadFile(e.dataTransfer.files?.[0]);
+  }
+
+  function updateRow(id, field, value) {
+    setRows(prev => prev.map(r => r._id === id ? { ...r, [field]: value } : r));
+  }
+
+  function deleteRow(id) {
+    setRows(prev => prev.filter(r => r._id !== id));
+  }
+
+  function clearAll() {
+    clearFormDraft();
+    reset();
+  }
+
+  // Duplicate check considers both already-enrolled employees AND other
+  // rows within this same batch — editing one row's email to match
+  // another row further down should flag both, live, as the admin types.
+  const rowDuplicate = (row) => {
+    if (row.email && enrolled.some(e => e.email === row.email)) return true;
+    if (row.employeeCode && enrolled.some(e => e.employeeCode === row.employeeCode)) return true;
+    const dupInBatch = rows.filter(r => r._id !== row._id && (
+      (row.email && r.email === row.email) ||
+      (row.employeeCode && r.employeeCode === row.employeeCode)
+    ));
+    return dupInBatch.length > 0;
+  };
+
+  const validRows = rows.filter(r => rowErrors(r).length === 0 && !rowDuplicate(r));
+  const problemCount = rows.length - validRows.length;
+
+  async function handleSave() {
+    setImporting(true);
+    let added = 0;
+    let skipped = 0;
+    for (const row of rows) {
+      const { _id, ...emp } = row;
+      if (rowErrors(row).length > 0 || rowDuplicate(row)) { skipped++; continue; }
+      if (seatsAvailable - added <= 0) { skipped++; continue; }
+      try { await enrollEmployee(emp); added++; } catch { skipped++; }
+    }
+    setImporting(false);
+    toast(`${added} employee${added !== 1 ? 's' : ''} imported${skipped > 0 ? ` · ${skipped} skipped` : ''}`, added > 0 ? 'success' : 'warning');
+    if (added > 0) { clearFormDraft(); handleClose(); }
+  }
+
+  return (
+    <Modal open={open} onClose={handleClose} title="Import Employees via CSV" width={stage === 'preview' ? 'max-w-3xl' : 'max-w-lg'}
+      footer={stage === 'preview' ? (
+        <>
+          <button className="btn-secondary" onClick={clearAll}>Clear all</button>
+          <button className="btn-primary" onClick={handleSave} disabled={importing || validRows.length === 0}>
+            {importing ? 'Importing…' : `Save ${validRows.length} employee${validRows.length !== 1 ? 's' : ''}`}
+          </button>
+        </>
+      ) : (
+        <button className="btn-secondary" onClick={handleClose}>Close</button>
+      )}
+    >
+      {stage === 'upload' ? (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-ink-600">Bulk-add employees from a spreadsheet.</p>
+            <button
+              onClick={downloadCSVTemplate}
+              className="flex items-center gap-1 text-xs text-brand-600 hover:text-brand-700 font-medium shrink-0"
+            >
+              <UserPlus size={11} /> Download template
+            </button>
+          </div>
+
+          {/* Column reference */}
+          <div className="rounded-lg bg-surface-50 border border-surface-200 p-3 space-y-1.5">
+            <p className="text-[11px] font-semibold text-ink-500 uppercase tracking-wide">Required columns</p>
+            <div className="flex flex-wrap gap-1">
+              {['firstName', 'lastName', 'email'].map(c => (
+                <code key={c} className="text-[11px] px-1.5 py-0.5 rounded bg-danger-50 text-danger-600 font-mono">{c}</code>
+              ))}
+            </div>
+            <p className="text-[11px] font-semibold text-ink-500 uppercase tracking-wide mt-2">Optional columns</p>
+            <div className="flex flex-wrap gap-1">
+              {['middleName', 'suffix', 'phone', 'role', 'department', 'employeeCode'].map(c => (
+                <code key={c} className="text-[11px] px-1.5 py-0.5 rounded bg-surface-100 text-ink-500 font-mono">{c}</code>
+              ))}
+            </div>
+            <p className="text-[10px] text-ink-400 mt-1">employeeCode auto-generated if blank</p>
+          </div>
+
+          {seatsAvailable === 0 && (
+            <div className="p-3 rounded-lg bg-warning-50 border border-warning-200 text-xs text-warning-700">
+              Seat limit reached — upgrade your plan to import more employees.
+            </div>
+          )}
+
+          {/* Drag & drop zone (also click-to-browse) */}
+          <label
+            onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={handleDrop}
+            className={`flex flex-col items-center justify-center gap-2 w-full rounded-xl border-2 border-dashed py-8 px-4 cursor-pointer transition-colors ${
+              dragOver ? 'border-brand-500 bg-brand-50' : 'border-surface-300 bg-surface-50 hover:bg-surface-100'
+            } ${seatsAvailable === 0 ? 'opacity-50 pointer-events-none' : ''}`}
+          >
+            <Upload size={20} className={dragOver ? 'text-brand-600' : 'text-ink-400'} />
+            <p className="text-sm font-semibold text-ink-700">
+              {dragOver ? 'Drop the CSV file here' : 'Drag & drop a CSV file here'}
+            </p>
+            <p className="text-xs text-ink-400">or click to browse</p>
+            <input type="file" accept=".csv,text/csv" className="hidden" onChange={handleFileInput} disabled={seatsAvailable === 0} />
+          </label>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {draftRestored && (
+            <DraftRestoredBanner
+              message="Restored the CSV import you were reviewing before the page reloaded."
+              onDiscard={clearAll}
+            />
+          )}
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-ink-600">
+              {rows.length} row{rows.length !== 1 ? 's' : ''} parsed
+              {problemCount > 0 && <span className="text-warning-600 font-medium"> · {problemCount} need{problemCount === 1 ? 's' : ''} attention</span>}
+            </p>
+            <button
+              onClick={() => document.getElementById('csv-reupload-input')?.click()}
+              className="flex items-center gap-1 text-xs text-brand-600 hover:text-brand-700 font-medium shrink-0"
+            >
+              <Upload size={11} /> Upload a different file
+            </button>
+            <input id="csv-reupload-input" type="file" accept=".csv,text/csv" className="hidden" onChange={handleFileInput} />
+          </div>
+
+          {parseErrors.length > 0 && (
+            <div className="rounded-lg bg-warning-50 border border-warning-200 p-3 space-y-1">
+              <p className="text-xs font-semibold text-warning-700">Rows skipped while parsing</p>
+              {parseErrors.map((err, i) => (
+                <p key={i} className="text-xs text-warning-600">{err}</p>
+              ))}
+            </div>
+          )}
+
+          {seatsAvailable === 0 && (
+            <div className="p-3 rounded-lg bg-warning-50 border border-warning-200 text-xs text-warning-700">
+              Seat limit reached — upgrade your plan to import more employees.
+            </div>
+          )}
+
+          {rows.length === 0 ? (
+            <div className="rounded-lg border border-surface-200 p-6 text-center text-sm text-ink-400">
+              No valid rows left. Clear all and upload a new file to try again.
+            </div>
+          ) : (
+            <div className="rounded-lg border border-surface-200 overflow-hidden">
+              <div className="max-h-80 overflow-auto">
+                <table className="border-collapse w-full">
+                  <colgroup>
+                    <col style={{ width: 110 }} />
+                    <col style={{ width: 100 }} />
+                    <col style={{ width: 110 }} />
+                    <col style={{ width: 70 }} />
+                    <col style={{ width: 190 }} />
+                    <col style={{ width: 130 }} />
+                    <col style={{ width: 110 }} />
+                    <col style={{ width: 110 }} />
+                    <col style={{ width: 120 }} />
+                    <col style={{ width: 40 }} />
+                  </colgroup>
+                  <thead className="sticky top-0 z-10 bg-surface-50">
+                    <tr>
+                      {['First name', 'Middle name', 'Last name', 'Suffix', 'Email', 'Phone', 'Role', 'Department', 'Employee code', ''].map((h, i) => (
+                        <th key={i} className="text-left text-[10px] font-semibold uppercase tracking-wide text-ink-500 px-1.5 py-2 border-b border-surface-200 whitespace-nowrap">
+                          {h}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-surface-100">
+                    {rows.map((row) => {
+                      const errs = rowErrors(row);
+                      const dup = rowDuplicate(row);
+                      const hasIssue = errs.length > 0 || dup;
+                      return (
+                        <Fragment key={row._id}>
+                          <tr className={hasIssue ? 'bg-danger-50/40' : ''}>
+                            <td className="p-1 align-top">
+                              <input value={row.firstName} onChange={e => updateRow(row._id, 'firstName', e.target.value)}
+                                placeholder="First name" className={`input w-full text-xs py-1.5 ${!row.firstName?.trim() ? 'border-danger-400' : ''}`} />
+                            </td>
+                            <td className="p-1 align-top">
+                              <input value={row.middleName} onChange={e => updateRow(row._id, 'middleName', e.target.value)}
+                                placeholder="Middle name" className="input w-full text-xs py-1.5" />
+                            </td>
+                            <td className="p-1 align-top">
+                              <input value={row.lastName} onChange={e => updateRow(row._id, 'lastName', e.target.value)}
+                                placeholder="Last name" className={`input w-full text-xs py-1.5 ${!row.lastName?.trim() ? 'border-danger-400' : ''}`} />
+                            </td>
+                            <td className="p-1 align-top">
+                              <input value={row.suffix} onChange={e => updateRow(row._id, 'suffix', e.target.value)}
+                                placeholder="Suffix" className="input w-full text-xs py-1.5" />
+                            </td>
+                            <td className="p-1 align-top">
+                              <input value={row.email} onChange={e => updateRow(row._id, 'email', e.target.value)}
+                                placeholder="Email" className={`input w-full text-xs py-1.5 ${!row.email?.includes('@') ? 'border-danger-400' : ''}`} />
+                            </td>
+                            <td className="p-1 align-top">
+                              <input value={row.phone} onChange={e => updateRow(row._id, 'phone', e.target.value)}
+                                placeholder="Phone" className="input w-full text-xs py-1.5" />
+                            </td>
+                            <td className="p-1 align-top">
+                              <input value={row.role} onChange={e => updateRow(row._id, 'role', e.target.value)}
+                                placeholder="Role" className="input w-full text-xs py-1.5" />
+                            </td>
+                            <td className="p-1 align-top">
+                              <input value={row.department} onChange={e => updateRow(row._id, 'department', e.target.value)}
+                                placeholder="Dept." className="input w-full text-xs py-1.5" />
+                            </td>
+                            <td className="p-1 align-top">
+                              <input value={row.employeeCode} onChange={e => updateRow(row._id, 'employeeCode', e.target.value)}
+                                placeholder="Auto" className="input w-full text-xs py-1.5" />
+                            </td>
+                            <td className="p-1 align-top">
+                              <button onClick={() => deleteRow(row._id)} title="Remove row"
+                                className="flex items-center justify-center p-1.5 rounded-lg text-ink-300 hover:text-danger-500 hover:bg-danger-50 transition-colors">
+                                <Trash2 size={13} />
+                              </button>
+                            </td>
+                          </tr>
+                          {hasIssue && (
+                            <tr className="bg-danger-50/40">
+                              <td colSpan={10} className="px-2 pb-1.5 -mt-1">
+                                <p className="text-[11px] text-danger-600 pl-0.5">
+                                  {dup ? 'Duplicate — matches an existing or another imported employee' : errs.join(' · ')}
+                                </p>
+                              </td>
+                            </tr>
+                          )}
+                        </Fragment>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </Modal>
   );
 }

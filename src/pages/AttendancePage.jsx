@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { format, subDays, parseISO } from 'date-fns';
 import { Clock, ChevronLeft, ChevronRight, Plus, Download } from 'lucide-react';
@@ -7,6 +7,10 @@ import { fmt, getSessionPunches, getShiftSessions, computeWorkedMinutes, compute
 import { StatusBadge, Avatar, SearchInput, SelectField, SectionHeader, EmptyState, Modal, InputField } from '../components/ui';
 import { useToast } from '../context/ToastContext';
 import { useAuth } from '../context/AuthContext';
+import { useFormDraft } from '../hooks/useFormDraft';
+import { attendanceDraftPrefix, attendanceDraftKey, isAttendanceFormMeaningful } from '../utils/draftKeys';
+import { useDraftRestoreOnMount } from '../hooks/useDraftRestoreOnMount';
+import DraftRestoredBanner from '../components/DraftRestoredBanner';
 
 // Extension-synced records carry a real `segments` timeline (see
 // extension/api.js#syncSegments) in addition to the work-only `sessions`
@@ -201,7 +205,7 @@ function empRecordId(e) {
 
 export default function AttendancePage() {
   const toast = useToast();
-  const { can } = useAuth();
+  const { can, user } = useAuth();
   const { subscription, addAttendanceRecord, updateAttendanceRecord } = useSubscription();
 
   const employees        = subscription?.enrolledEmployees  || [];
@@ -258,6 +262,13 @@ export default function AttendancePage() {
       `${a.employee.firstName} ${a.employee.lastName}`.localeCompare(`${b.employee.firstName} ${b.employee.lastName}`)
     );
   }, [attendanceRecords, employees, shifts, date, search, dept, statusFilter, lateThreshold]);
+
+  useDraftRestoreOnMount({
+    prefix: attendanceDraftPrefix(user?.id),
+    ready: attendanceRecords.length > 0,
+    findById: (id) => attendanceRecords.find(r => String(r.id) === id),
+    onRestoreEdit: (target) => { setEditRecord(target); return true; },
+  });
 
   function prevDay() { setDate(d => format(subDays(parseISO(d), 1), 'yyyy-MM-dd')); }
   function nextDay() {
@@ -459,6 +470,7 @@ export default function AttendancePage() {
         lateThreshold={lateThreshold}
         title="Add Attendance Record"
         initial={{ employeeId: '', sessions: [], status: 'present', notes: '' }}
+        onDraftRestored={() => setAddModal(true)}
       />
 
       {/* Edit Record Modal */}
@@ -480,6 +492,7 @@ export default function AttendancePage() {
             shifts={shifts}
             lateThreshold={lateThreshold}
             title="Edit Attendance Record"
+            recordId={editRecord.id}
             initial={{
               employeeId: normalizedEmpId,
               sessions: deriveFormSessions(shift, editRecord),
@@ -493,11 +506,42 @@ export default function AttendancePage() {
   );
 }
 
-function AttendanceModal({ open, onClose, onSave, employees, shifts, lateThreshold, title, initial }) {
+function AttendanceModal({ open, onClose, onSave, employees, shifts, lateThreshold, title, initial, recordId, onDraftRestored }) {
   const toast = useToast();
+  const { user } = useAuth();
   const [form, setForm] = useState(initial);
   const [saving, setSaving] = useState(false);
+  const [draftRestored, setDraftRestored] = useState(false);
   const f = k => v => setForm(p => ({ ...p, [k]: v }));
+
+  // ── Draft persistence ────────────────────────────────────────────
+  const draftKey = attendanceDraftKey(user?.id, recordId);
+  const isEdit = recordId != null;
+  const { clear: clearFormDraft } = useFormDraft(
+    draftKey,
+    { form },
+    {
+      isMeaningful: (draft) => isAttendanceFormMeaningful(draft, isEdit ? initial : null),
+      onOpen: onDraftRestored,
+      onRestore: (draft) => {
+        setForm(prev => ({ ...prev, ...draft.form }));
+        setDraftRestored(true);
+        toast(`Restored the ${isEdit ? 'changes' : 'record details'} you were entering before the page reloaded.`, 'info');
+      },
+    }
+  );
+
+  function discardDraft() {
+    clearFormDraft();
+    setForm(initial);
+    setDraftRestored(false);
+  }
+
+  function handleClose() {
+    clearFormDraft();
+    setDraftRestored(false);
+    onClose();
+  }
 
   const empOptions = [
     { value: '', label: 'Select employee…' },
@@ -558,6 +602,8 @@ function AttendanceModal({ open, onClose, onSave, employees, shifts, lateThresho
     setSaving(true);
     try {
       await onSave(form);
+      clearFormDraft();
+      setDraftRestored(false);
     } catch (err) {
       toast(err.message || 'Could not save — please try again.', 'error');
     } finally {
@@ -568,15 +614,18 @@ function AttendanceModal({ open, onClose, onSave, employees, shifts, lateThresho
   const sessions = form.sessions || [];
 
   return (
-    <Modal open={open} onClose={onClose} title={title} width="max-w-md"
+    <Modal open={open} onClose={handleClose} title={title} width="max-w-md"
       footer={
         <>
-          <button className="btn-secondary" onClick={onClose}>Cancel</button>
+          <button className="btn-secondary" onClick={handleClose}>Cancel</button>
           <button className="btn-primary" disabled={saving} onClick={handleSave}>{saving ? 'Saving…' : 'Save'}</button>
         </>
       }
     >
       <div className="space-y-3">
+        {draftRestored && (
+          <DraftRestoredBanner onDiscard={discardDraft} />
+        )}
         <SelectField label="Employee" value={form.employeeId} onChange={handleEmployeeChange} options={empOptions} />
 
         {/* Show assigned shift as info */}
