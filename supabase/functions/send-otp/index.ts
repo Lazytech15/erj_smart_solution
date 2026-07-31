@@ -21,19 +21,28 @@ const supabase = createClient(
   { auth: { persistSession: false } },
 );
 
+function corsHeaders() {
+  return {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+  };
+}
+
 async function sha256(text: string): Promise<string> {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
   return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 Deno.serve(async (req) => {
-  if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders() });
+  if (req.method !== "POST") return new Response("Method not allowed", { status: 405, headers: corsHeaders() });
 
   const { email, purpose } = await req.json().catch(() => ({}));
   if (!email || !purpose) {
     return new Response(JSON.stringify({ ok: false, error: "email and purpose are required" }), {
       status: 400,
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...corsHeaders() },
     });
   }
 
@@ -54,7 +63,7 @@ Deno.serve(async (req) => {
   if (error) {
     return new Response(JSON.stringify({ ok: false, error: error.message }), {
       status: 500,
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...corsHeaders() },
     });
   }
 
@@ -68,7 +77,7 @@ Deno.serve(async (req) => {
   });
 
   if (!result.ok) {
-    return new Response(JSON.stringify(result), { status: 500, headers: { "Content-Type": "application/json" } });
+    return new Response(JSON.stringify(result), { status: 500, headers: { "Content-Type": "application/json", ...corsHeaders() } });
   }
-  return new Response(JSON.stringify({ ok: true }), { headers: { "Content-Type": "application/json" } });
+  return new Response(JSON.stringify({ ok: true }), { headers: { "Content-Type": "application/json", ...corsHeaders() } });
 });

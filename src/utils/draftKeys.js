@@ -107,3 +107,16 @@ export function departmentDraftKey(userId) {
 export function isDepartmentFormMeaningful(draft) {
   return Boolean(draft?.form?.name?.trim());
 }
+
+// ── Signup (pre-auth, so no userId — keyed per plan so switching plans
+// on the pricing page doesn't bleed one company's draft into another) ──
+// Passwords and card details are deliberately never persisted here — only
+// the non-sensitive fields (company info, name, email, current step) are
+// worth restoring; the person retypes their password either way.
+export function signupDraftKey(planId) {
+  return `draft:signup:${planId || 'default'}`;
+}
+export function isSignupFormMeaningful(draft) {
+  const c = draft?.company, a = draft?.account;
+  return Boolean(c?.name?.trim() || c?.address?.trim() || a?.adminName?.trim() || a?.adminEmail?.trim());
+}

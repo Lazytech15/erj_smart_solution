@@ -1,12 +1,19 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { ArrowRight, ArrowLeft, Check, Building2, CreditCard, Users, Eye, EyeOff, Zap } from 'lucide-react';
+import { ArrowRight, ArrowLeft, Check, Building2, CreditCard, Users, Eye, EyeOff, Zap, ShieldCheck, Loader2 } from 'lucide-react';
 import { PLANS, useSubscription } from '../../context/SubscriptionContext';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { Spinner } from '../../components/ui';
+import { supabase } from '../../utils/supabase';
 import PasswordStrengthField, { isPasswordStrong } from '../../components/PasswordStrengthField';
 import LegalModal from '../../components/LegalModal';
+import { useFormDraft } from '../../hooks/useFormDraft';
+import { signupDraftKey, isSignupFormMeaningful } from '../../utils/draftKeys';
+import DraftRestoredBanner from '../../components/DraftRestoredBanner';
+
+const OTP_PURPOSE = 'signup_verification';
+const RESEND_COOLDOWN_SECONDS = 30;
 
 const INDUSTRIES = ['Technology','Healthcare','Finance & Banking','Manufacturing','Retail','Education','Logistics','Construction','Media & Entertainment','Other'];
 const COMPANY_SIZES = ['1–10','11–50','51–200','201–500','501–1,000','1,000+'];
@@ -49,6 +56,115 @@ export default function SignupPage() {
 
   const [errors, setErrors] = useState({});
 
+  // ── Draft persistence (survives accidental reload / tab discard) ──
+  // Only non-sensitive fields are saved — passwords and card details never
+  // touch localStorage, so a restored draft always still needs those retyped.
+  const [draftRestored, setDraftRestored] = useState(false);
+  const draftKey = signupDraftKey(planId);
+  const { clear: clearFormDraft } = useFormDraft(
+    draftKey,
+    { step, company, account: { adminName: account.adminName, adminEmail: account.adminEmail } },
+    {
+      isMeaningful: isSignupFormMeaningful,
+      onRestore: (draft) => {
+        if (draft.company) setCompany(prev => ({ ...prev, ...draft.company }));
+        if (draft.account) setAccount(prev => ({ ...prev, adminName: draft.account.adminName || '', adminEmail: draft.account.adminEmail || '' }));
+        if (typeof draft.step === 'number' && draft.step < STEPS.length) setStep(draft.step);
+        setDraftRestored(true);
+        toast('Restored your signup details from before the page reloaded. Please re-enter your password.', 'info');
+      },
+    }
+  );
+
+  function discardDraft() {
+    clearFormDraft();
+    setDraftRestored(false);
+  }
+
+  // ── Email OTP verification ──
+  const [otpStatus, setOtpStatus] = useState('idle'); // idle | sending | sent | verifying | verified
+  const [otpCode, setOtpCode] = useState('');
+  const [otpError, setOtpError] = useState('');
+  const [verifiedEmail, setVerifiedEmail] = useState(''); // email the current 'verified' status applies to
+  const [resendCooldown, setResendCooldown] = useState(0);
+  const cooldownRef = useRef(null);
+
+  useEffect(() => () => clearInterval(cooldownRef.current), []);
+
+  function startResendCooldown() {
+    setResendCooldown(RESEND_COOLDOWN_SECONDS);
+    clearInterval(cooldownRef.current);
+    cooldownRef.current = setInterval(() => {
+      setResendCooldown(s => {
+        if (s <= 1) { clearInterval(cooldownRef.current); return 0; }
+        return s - 1;
+      });
+    }, 1000);
+  }
+
+  const emailIsVerified = otpStatus === 'verified' && verifiedEmail === account.adminEmail;
+
+  function isValidEmail(v) {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
+  }
+
+  async function sendOtp() {
+    if (!isValidEmail(account.adminEmail)) {
+      setErrors(prev => ({ ...prev, adminEmail: 'Enter a valid email before sending a code' }));
+      return;
+    }
+    setOtpError('');
+    setOtpStatus('sending');
+    try {
+      const { data, error } = await supabase.functions.invoke('send-otp', {
+        body: { email: account.adminEmail, purpose: OTP_PURPOSE },
+      });
+      if (error || !data?.ok) throw new Error(data?.error || error?.message || 'Failed to send code');
+      setOtpStatus('sent');
+      setOtpCode('');
+      startResendCooldown();
+      toast(`Verification code sent to ${account.adminEmail}`, 'success');
+    } catch (err) {
+      setOtpStatus('idle');
+      setOtpError(err.message || 'Failed to send code. Please try again.');
+    }
+  }
+
+  async function verifyOtp() {
+    if (otpCode.trim().length !== 6) {
+      setOtpError('Enter the 6-digit code');
+      return;
+    }
+    setOtpError('');
+    setOtpStatus('verifying');
+    try {
+      const { data, error } = await supabase.functions.invoke('verify-otp', {
+        body: { email: account.adminEmail, purpose: OTP_PURPOSE, code: otpCode.trim() },
+      });
+      if (error || !data?.ok) throw new Error(data?.error || error?.message || 'Incorrect code');
+      setOtpStatus('verified');
+      setVerifiedEmail(account.adminEmail);
+      setOtpError('');
+      setErrors(prev => ({ ...prev, adminEmail: undefined }));
+    } catch (err) {
+      setOtpStatus('sent');
+      setOtpError(err.message || 'Incorrect or expired code');
+    }
+  }
+
+  // Reset verification whenever the email is edited after being verified/sent
+  function handleEmailChange(v) {
+    af('adminEmail')(v);
+    if (otpStatus !== 'idle') {
+      setOtpStatus('idle');
+      setOtpCode('');
+      setOtpError('');
+      setVerifiedEmail('');
+      setResendCooldown(0);
+      clearInterval(cooldownRef.current);
+    }
+  }
+
   function validateStep() {
     const e = {};
     if (step === 0) {
@@ -58,6 +174,7 @@ export default function SignupPage() {
     if (step === 1) {
       if (!account.adminName.trim()) e.adminName = 'Your name is required';
       if (!account.adminEmail.includes('@')) e.adminEmail = 'Valid email required';
+      else if (!emailIsVerified) e.adminEmail = 'Please verify your email with the code we sent';
       if (!account.password) e.password = 'Password is required';
       else if (!isPasswordStrong(account.password)) e.password = 'Password does not meet all requirements';
       if (account.password !== account.confirmPassword) e.confirmPassword = 'Passwords do not match';
@@ -97,6 +214,7 @@ export default function SignupPage() {
         subscriptionId: newSub.subscriptionId,
       });
       // registerCompanyAdmin already signs the user in — no need to call login() again.
+      clearFormDraft();
       toast(
         isTrialPlan
           ? 'Your 14-day free trial has started. Welcome!'
@@ -276,6 +394,14 @@ export default function SignupPage() {
                 </p>
               </div>
 
+              {draftRestored && (
+                <DraftRestoredBanner
+                  className="mb-4"
+                  message="Restored your signup details from before the page reloaded. Please re-enter your password."
+                  onDiscard={discardDraft}
+                />
+              )}
+
               {/* Step 0: Company */}
               {step === 0 && (
                 <div className="space-y-4">
@@ -317,9 +443,63 @@ export default function SignupPage() {
                   </div>
                   <div>
                     <label className={labelClass}>Work Email</label>
-                    <input type="email" className={`${inputClass} ${errors.adminEmail ? 'border-red-400' : ''}`}
-                      value={account.adminEmail} onChange={e => af('adminEmail')(e.target.value)} placeholder="maria@company.com" />
+                    <div className="flex items-start gap-2">
+                      <div className="flex-1">
+                        <input type="email" disabled={emailIsVerified}
+                          className={`${inputClass} ${errors.adminEmail ? 'border-red-400' : ''} ${emailIsVerified ? 'opacity-70' : ''}`}
+                          value={account.adminEmail} onChange={e => handleEmailChange(e.target.value)} placeholder="maria@company.com" />
+                      </div>
+                      {emailIsVerified ? (
+                        <div className="flex items-center gap-1 px-3 py-2.5 rounded-xl text-xs font-semibold shrink-0"
+                          style={{ background: '#ecfdf5', color: '#059669', border: '1px solid #a7f3d0' }}>
+                          <ShieldCheck size={13} /> Verified
+                        </div>
+                      ) : (
+                        <button type="button" onClick={sendOtp} disabled={otpStatus === 'sending' || resendCooldown > 0}
+                          className="shrink-0 flex items-center justify-center gap-1.5 px-3.5 py-2.5 rounded-xl text-xs font-bold whitespace-nowrap transition-all"
+                          style={{
+                            background: (otpStatus === 'sending' || resendCooldown > 0) ? '#e2e8f0' : '#eef2ff',
+                            color: (otpStatus === 'sending' || resendCooldown > 0) ? '#94a3b8' : '#4f46e5',
+                          }}>
+                          {otpStatus === 'sending'
+                            ? <><Loader2 size={13} className="animate-spin" /> Sending</>
+                            : resendCooldown > 0
+                              ? `Resend in ${resendCooldown}s`
+                              : otpStatus === 'sent'
+                                ? 'Resend code'
+                                : 'Send code'}
+                        </button>
+                      )}
+                    </div>
                     {errors.adminEmail && <p className={errorClass}>{errors.adminEmail}</p>}
+
+                    {(otpStatus === 'sent' || otpStatus === 'verifying') && (
+                      <div className="mt-2.5 flex items-start gap-2 p-3 rounded-xl" style={{ background: '#f8fafc', border: '1px solid #e2e8f0' }}>
+                        <div className="flex-1">
+                          <p className="text-xs text-slate-500 mb-2">
+                            Enter the 6-digit code we sent to <span className="font-semibold text-slate-700">{account.adminEmail}</span>
+                          </p>
+                          <div className="flex items-center gap-2">
+                            <input
+                              type="text"
+                              inputMode="numeric"
+                              maxLength={6}
+                              value={otpCode}
+                              onChange={e => { setOtpCode(e.target.value.replace(/\D/g, '').slice(0, 6)); setOtpError(''); }}
+                              placeholder="000000"
+                              className="w-28 px-3 py-2 rounded-lg text-sm font-mono tracking-[0.3em] text-center bg-white border border-slate-200 outline-none focus:border-indigo-400 focus:ring-2"
+                            />
+                            <button type="button" onClick={verifyOtp} disabled={otpStatus === 'verifying' || otpCode.length !== 6}
+                              className="flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-bold text-white transition-all"
+                              style={{ background: (otpStatus === 'verifying' || otpCode.length !== 6) ? '#a5b4fc' : 'linear-gradient(135deg, #6366f1, #4f46e5)' }}>
+                              {otpStatus === 'verifying' ? <Loader2 size={13} className="animate-spin" /> : 'Verify'}
+                            </button>
+                          </div>
+                          {otpError && <p className={errorClass}>{otpError}</p>}
+                        </div>
+                      </div>
+                    )}
+                    {otpStatus === 'idle' && otpError && <p className={`${errorClass} mt-1`}>{otpError}</p>}
                   </div>
 
                   {/* Password with strength checker */}

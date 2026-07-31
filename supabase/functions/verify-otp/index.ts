@@ -19,19 +19,28 @@ const supabase = createClient(
   { auth: { persistSession: false } },
 );
 
+function corsHeaders() {
+  return {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+  };
+}
+
 async function sha256(text: string): Promise<string> {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
   return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 Deno.serve(async (req) => {
-  if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders() });
+  if (req.method !== "POST") return new Response("Method not allowed", { status: 405, headers: corsHeaders() });
 
   const { email, purpose, code } = await req.json().catch(() => ({}));
   if (!email || !purpose || !code) {
     return new Response(JSON.stringify({ ok: false, error: "email, purpose, and code are required" }), {
       status: 400,
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...corsHeaders() },
     });
   }
 
@@ -48,14 +57,14 @@ Deno.serve(async (req) => {
   if (error || !row) {
     return new Response(JSON.stringify({ ok: false, error: "No active code for this email/purpose" }), {
       status: 400,
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...corsHeaders() },
     });
   }
 
   if (new Date(row.expires_at).getTime() < Date.now()) {
     return new Response(JSON.stringify({ ok: false, error: "Code expired" }), {
       status: 400,
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...corsHeaders() },
     });
   }
 
@@ -63,11 +72,11 @@ Deno.serve(async (req) => {
   if (codeHash !== row.code_hash) {
     return new Response(JSON.stringify({ ok: false, error: "Incorrect code" }), {
       status: 400,
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...corsHeaders() },
     });
   }
 
   await supabase.from("otp_codes").update({ used_at: new Date().toISOString() }).eq("id", row.id);
 
-  return new Response(JSON.stringify({ ok: true }), { headers: { "Content-Type": "application/json" } });
+  return new Response(JSON.stringify({ ok: true }), { headers: { "Content-Type": "application/json", ...corsHeaders() } });
 });

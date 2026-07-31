@@ -117,7 +117,3 @@ await startCheckout({
 - This only wires up **checkout → activation**. It does not yet auto-charge on renewal — PayMongo Checkout Sessions are one-time-use, so a real recurring-billing setup would need either the customer coming back to pay each cycle (with `subscription-lifecycle` emailing them when `nextBillingDate` approaches) or moving to PayMongo's saved-card/recurring charge flow later.
 - Trial expiration still isn't wired into either function — a `trialing` subscription reaching the end of `trialEndsAt` doesn't yet prompt a checkout or get suspended. Worth adding a "trial ending" email + forced checkout redirect.
 - `create-checkout-session` currently trusts whatever `amountPhp` the frontend sends — for production, compute the amount server-side from `planId` + seat count instead of accepting it from the client, so nobody can tamper with the price in the request.
-
--Card Number	Brand	CVC	Expiry
--4343 4343 4343 4345	Visa	any 3 digits	any future date
--5555 4444 4444 4457	Mastercard	any 3 digits	any future date

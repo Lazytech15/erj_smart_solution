@@ -382,6 +382,18 @@ inspector_port = 8083
 # The Deno major version to use.
 deno_version = 2
 
+# send-otp / verify-otp are called during signup, before the person has an
+# account or session — there's no JWT to verify yet. Without this, the
+# platform's own auth check rejects the request (including the OPTIONS
+# preflight) with 401 before our code — and its CORS headers — ever run,
+# which the browser reports as a CORS failure even though our corsHeaders()
+# in index.ts is correct.
+[functions.send-otp]
+verify_jwt = false
+
+[functions.verify-otp]
+verify_jwt = false
+
 # [edge_runtime.secrets]
 # secret_key = "env(SECRET_VALUE)"
 
