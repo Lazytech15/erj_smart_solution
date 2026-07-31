@@ -9,6 +9,7 @@ import { getSubscription } from '../utils/db';
 import { ABAC_RESULT } from '../utils/abac';
 import { supabase } from '../utils/supabase';
 import { consumeLogoutReason } from '../utils/sessionPolicy';
+import { LAST_EMAIL_COOKIE, hasAcceptedCookies, getCookie, setCookie } from '../utils/cookies';
 
 /** Human-readable copy for each force-logout reason. */
 const LOGOUT_NOTICES = {
@@ -49,7 +50,12 @@ export default function LoginPage() {
   const toast   = useToast();
   const navigate = useNavigate();
 
-  const [email,       setEmail]       = useState('');
+  // Prefills from the "remember my email" cookie set after a previous
+  // successful sign-in — only present at all if the person accepted the
+  // cookie-consent banner, and only ever holds an email, never a password
+  // or token. Purely a convenience (one less field to retype); it has no
+  // bearing on whether the person is actually authenticated.
+  const [email,       setEmail]       = useState(() => (hasAcceptedCookies() ? getCookie(LAST_EMAIL_COOKIE) || '' : ''));
   const [password,    setPassword]    = useState('');
   const [rememberMe,  setRememberMe]  = useState(false);
   const [showPw,      setShowPw]      = useState(false);
@@ -111,6 +117,7 @@ export default function LoginPage() {
       const { user, abac } = await login(email, password, rememberMe);
       toast('Welcome back!', 'success');
       loggedInRoleRef.current = user?.role ?? null;
+      if (hasAcceptedCookies()) setCookie(LAST_EMAIL_COOKIE, email);
 
       // Stash flags so we can show the banner after commitLogin
       if (abac?.flags?.length) {
@@ -148,6 +155,7 @@ export default function LoginPage() {
       const { user, abac } = await verifyMfaAndLogin(mfaStep.factorId, mfaCode, email, rememberMe);
       toast('Welcome back!', 'success');
       loggedInRoleRef.current = user?.role ?? null;
+      if (hasAcceptedCookies()) setCookie(LAST_EMAIL_COOKIE, email);
       if (abac?.flags?.length) setSecurityFlags(abac.flags);
 
       const subPromise = (user?.subscriptionId && !['superadmin', 'sub_superadmin'].includes(user?.role))

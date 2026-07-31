@@ -8,6 +8,7 @@ import { NotificationsProvider } from './context/NotificationsContext';
 import AppLayout from './components/layout/AppLayout';
 import PlanGate from './components/PlanGate';
 import LoadingScreen from './components/LoadingScreen';
+import CookieConsentBanner from './components/CookieConsentBanner';
 import { loadDraft, findDraftsByPrefix } from './utils/formDraft';
 import { employeeDraftKey, isAddEmployeeFormMeaningful, csvImportDraftKey, isCsvImportDraftMeaningful } from './utils/employeeDraft';
 import {
@@ -72,6 +73,16 @@ function PrivateRoute({ children }) {
   // Trial expired — everything except Subscription & Billing is locked until
   // the client activates a paid plan.
   if (subscription.status === 'trialing' && trialDaysLeft <= 0 && location.pathname !== '/app/subscription') {
+    return <Navigate to="/app/subscription" replace />;
+  }
+
+  // Suspended (set by the subscription-lifecycle cron, ~7 days after a missed
+  // payment) — same lockdown as cancelled/trial-expired: everything except
+  // Subscription & Billing redirects to the reactivation screen. Historical
+  // data stays intact in the DB, just inaccessible until they reactivate.
+  // NOTE: `grace_period` (days 0-7 after a missed payment) intentionally
+  // does NOT lock anything — the system stays fully usable during grace.
+  if (subscription.status === 'suspended' && location.pathname !== '/app/subscription') {
     return <Navigate to="/app/subscription" replace />;
   }
 
@@ -318,6 +329,7 @@ export default function App() {
             </FirstLoadGate>
             <DraftResumeRedirect />
             <ConnectionIssueModal />
+            <CookieConsentBanner />
           </ToastProvider>
           </NotificationsProvider>
         </SubscriptionProvider>

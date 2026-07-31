@@ -103,13 +103,24 @@ export function AuthProvider({ children }) {
 
         // Security policy layer: force re-login past midnight (or past 24h
         // for "remember me" sessions), independent of the JWT's own expiry.
-        const policyExpired = session?.user ? isSessionPolicyExpired() : false;
+        //
+        // A session with NO recorded policy counts as expired too (fail
+        // closed), not just a session whose policy has lapsed. This used to
+        // fail OPEN — a missing policy silently got backfilled with a brand
+        // new "next midnight" window and the person was let straight in —
+        // which meant any session whose policy record didn't survive (e.g.
+        // cleared by the browser/an extension/ITP while Supabase's own
+        // longer-lived refresh token in localStorage did survive) got quietly
+        // re-armed for another full day instead of being logged out. That's
+        // exactly the "I didn't log out yesterday and I'm still in today"
+        // symptom this layer exists to prevent. Every real login path
+        // (login/verifyMfaAndLogin/registerCompanyAdmin) writes a policy the
+        // moment a session is established, so a live session that doesn't
+        // have one on record is never legitimate — treat it the same as an
+        // explicitly-lapsed one.
+        const policyExpired = session?.user ? (isSessionPolicyExpired() || !getSessionPolicy()) : false;
 
         if (session?.user && !isExpired && !policyExpired && mounted) {
-          // Backfill a policy for sessions that predate this feature (or any
-          // other edge case where one wasn't recorded) — default, non-"remember
-          // me" terms, so it's still bound by the midnight/30-min-idle rules.
-          if (!getSessionPolicy()) startSessionPolicy(false);
           const profile = await fetchProfile(session.user.id);
           setUser(buildUser(session.user, profile));
         } else if (mounted) {
@@ -631,6 +642,17 @@ export function AuthProvider({ children }) {
     };
     document.addEventListener('visibilitychange', handleVisibility);
 
+    // Some browsers restore a closed/backgrounded tab from bfcache (the page
+    // resumes exactly where it was frozen, JS state and all) rather than
+    // re-running main.jsx from scratch — `event.persisted` is how that shows
+    // up. visibilitychange normally covers this too, but this is a cheap,
+    // explicit belt-and-suspenders check for the specific "closed the site
+    // and reopened it later" case the midnight policy is meant to catch.
+    const handlePageShow = (event) => {
+      if (event.persisted) checkPolicy();
+    };
+    window.addEventListener('pageshow', handlePageShow);
+
     // Also catch it right away in case it's already overdue when this effect
     // (re)attaches, e.g. after a TOKEN_REFRESHED-driven remount.
     checkPolicy();
@@ -639,6 +661,7 @@ export function AuthProvider({ children }) {
       clearInterval(policyInterval);
       ACTIVITY_EVENTS.forEach(evt => window.removeEventListener(evt, handleActivity));
       document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('pageshow', handlePageShow);
     };
   }, [user, logout]);
 

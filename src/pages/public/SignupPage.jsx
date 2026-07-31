@@ -1,156 +1,15 @@
 import { useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { ArrowRight, ArrowLeft, Check, Building2, CreditCard, Users, Eye, EyeOff, Zap, FileText, Shield } from 'lucide-react';
+import { ArrowRight, ArrowLeft, Check, Building2, CreditCard, Users, Eye, EyeOff, Zap } from 'lucide-react';
 import { PLANS, useSubscription } from '../../context/SubscriptionContext';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { Spinner } from '../../components/ui';
 import PasswordStrengthField, { isPasswordStrong } from '../../components/PasswordStrengthField';
+import LegalModal from '../../components/LegalModal';
 
 const INDUSTRIES = ['Technology','Healthcare','Finance & Banking','Manufacturing','Retail','Education','Logistics','Construction','Media & Entertainment','Other'];
 const COMPANY_SIZES = ['1–10','11–50','51–200','201–500','501–1,000','1,000+'];
-
-/* ── Legal modal content ── */
-const LEGAL_CONTENT = {
-  terms: {
-    title: 'Terms of Service',
-    icon: FileText,
-    sections: [
-      {
-        heading: '1. Acceptance of Terms',
-        body: 'By accessing or using ERJ Smart Solutions ("Service"), you agree to be bound by these Terms of Service. If you do not agree to these terms, you may not access or use the Service.',
-      },
-      {
-        heading: '2. Use of Service',
-        body: 'You may use the Service only for lawful purposes and in accordance with these Terms. You agree not to use the Service in any way that violates applicable laws or regulations, or in any manner that could damage, disable, overburden, or impair the Service.',
-      },
-      {
-        heading: '3. Account Registration',
-        body: 'To access certain features, you must register for an account. You agree to provide accurate, current, and complete information during registration and to update such information as needed. You are responsible for maintaining the confidentiality of your account credentials.',
-      },
-      {
-        heading: '4. Subscription & Billing',
-        body: 'Paid plans are billed monthly per enrolled employee. You authorize ERJ Smart Solutions to charge your payment method on file. All fees are non-refundable except as required by law. We reserve the right to change pricing with 30 days notice.',
-      },
-      {
-        heading: '5. Data Ownership',
-        body: 'You retain ownership of all data you upload or create in the Service. You grant us a limited license to process that data solely to provide the Service to you. We will not sell or share your data with third parties without your consent.',
-      },
-      {
-        heading: '6. Termination',
-        body: 'Either party may terminate this agreement at any time. Upon termination, your access to the Service will cease. We will retain your data for 30 days following termination, after which it will be permanently deleted.',
-      },
-      {
-        heading: '7. Limitation of Liability',
-        body: 'To the fullest extent permitted by law, ERJ Smart Solutions shall not be liable for any indirect, incidental, special, consequential, or punitive damages, including lost profits, arising out of or related to your use of the Service.',
-      },
-      {
-        heading: '8. Governing Law',
-        body: 'These Terms shall be governed by and construed in accordance with the laws of the Republic of the Philippines, without regard to its conflict of law provisions.',
-      },
-    ],
-  },
-  privacy: {
-    title: 'Privacy Policy',
-    icon: Shield,
-    sections: [
-      {
-        heading: '1. Information We Collect',
-        body: 'We collect information you provide directly, such as your name, email address, company details, and payment information. We also collect usage data, device information, and log data when you interact with the Service.',
-      },
-      {
-        heading: '2. How We Use Your Information',
-        body: 'We use your information to provide, maintain, and improve the Service; process transactions; send transactional and promotional communications; monitor and analyze usage patterns; and comply with legal obligations.',
-      },
-      {
-        heading: '3. Data Storage & Security',
-        body: 'Your data is stored on secure servers within your selected region. We implement industry-standard security measures including 256-bit SSL encryption, regular security audits, and access controls to protect your data from unauthorized access.',
-      },
-      {
-        heading: '4. Data Sharing',
-        body: 'We do not sell your personal data. We may share data with trusted service providers who assist in operating the Service, subject to confidentiality agreements. We may disclose data if required by law or to protect the rights and safety of our users.',
-      },
-      {
-        heading: '5. Cookies',
-        body: 'We use cookies and similar tracking technologies to enhance your experience, analyze usage, and deliver relevant content. You can control cookie settings through your browser preferences, though some features may not function properly if cookies are disabled.',
-      },
-      {
-        heading: '6. Your Rights',
-        body: 'You have the right to access, correct, or delete your personal data at any time. You may also object to processing or request data portability. To exercise these rights, contact our Data Protection Officer at privacy@erj.ph.',
-      },
-      {
-        heading: '7. Data Retention',
-        body: 'We retain your data for as long as your account is active or as needed to provide the Service. After account termination, data is retained for 30 days before permanent deletion, unless longer retention is required by law.',
-      },
-      {
-        heading: '8. Contact Us',
-        body: 'For questions about this Privacy Policy or our data practices, please contact us at privacy@erj.ph or write to ERJ Smart Solutions, 8F BGC Corporate Center, 30th Street, Bonifacio Global City, Taguig City, Metro Manila, Philippines.',
-      },
-    ],
-  },
-};
-
-/* ── Legal Modal Component ── */
-function LegalModal({ type, onClose }) {
-  const content = LEGAL_CONTENT[type];
-  if (!content) return null;
-  const Icon = content.icon;
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      style={{ background: 'rgba(15,23,42,0.6)', backdropFilter: 'blur(4px)' }}
-    >
-      <div
-        className="bg-white rounded-2xl w-full max-w-lg max-h-[80vh] flex flex-col overflow-hidden"
-        style={{ boxShadow: '0 24px 64px rgba(0,0,0,0.18), 0 2px 8px rgba(0,0,0,0.08)' }}
-      >
-        {/* Header */}
-        <div
-          className="flex items-center justify-between px-6 py-5"
-          style={{ borderBottom: '1px solid #e2e8f0' }}
-        >
-          <div className="flex items-center gap-3">
-            <div
-              className="w-9 h-9 rounded-xl flex items-center justify-center"
-              style={{ background: 'rgba(99,102,241,0.1)' }}
-            >
-              <Icon size={16} style={{ color: '#6366f1' }} />
-            </div>
-            <div>
-              <h2 className="text-base font-bold text-slate-900">{content.title}</h2>
-              <p className="text-xs text-slate-400">ERJ Smart Solutions · Last updated June 2025</p>
-            </div>
-          </div>
-        </div>
-
-        {/* Scrollable body */}
-        <div className="overflow-y-auto flex-1 px-6 py-5 space-y-5">
-          {content.sections.map(s => (
-            <div key={s.heading}>
-              <h3 className="text-sm font-bold text-slate-800 mb-1.5">{s.heading}</h3>
-              <p className="text-sm text-slate-500 leading-relaxed">{s.body}</p>
-            </div>
-          ))}
-        </div>
-
-        {/* Footer */}
-        <div
-          className="px-6 py-4 flex justify-end"
-          style={{ borderTop: '1px solid #e2e8f0', background: '#f8fafc' }}
-        >
-          <button
-            onClick={onClose}
-            className="px-5 py-2 rounded-xl text-sm font-bold text-white"
-            style={{ background: 'linear-gradient(135deg, #6366f1, #4f46e5)', boxShadow: '0 4px 14px rgba(99,102,241,0.3)' }}
-          >
-            Got it
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 /* ── Main Page ── */
 export default function SignupPage() {

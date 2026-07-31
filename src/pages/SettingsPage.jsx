@@ -1,10 +1,14 @@
 import { useState, useRef } from 'react';
-import { Shield, Bell, Clock, Key, Globe, Save, Mail, MessageSquare, Lock, ArrowUpRight, Zap, Upload, X as XIcon, Image as ImageIcon } from 'lucide-react';
+import { Shield, Bell, Clock, Key, Globe, Save, Mail, MessageSquare, Lock, ArrowUpRight, Zap, Upload, X as XIcon, Image as ImageIcon, Cookie } from 'lucide-react';
 import { SectionHeader, InputField, SelectField, Modal } from '../components/ui';
 import { useToast } from '../context/ToastContext';
 import { useSubscription, PLANS } from '../context/SubscriptionContext';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../utils/supabase';
+import { CONSENT_COOKIE, LAST_EMAIL_COOKIE, getCookie, setCookie, deleteCookie } from '../utils/cookies';
+import { setCookieConsent } from '../utils/db';
+import { useAuth } from '../context/AuthContext';
+import LegalModal from '../components/LegalModal';
 
 /* ── convertToWebP: browser-side downscale/compress, mirrors the avatar/
  *  employee-photo upload flow elsewhere in the app. ── */
@@ -162,6 +166,30 @@ export default function SettingsPage() {
 
   // Confirmation modal state for enabling notifications
   const [notifConfirm, setNotifConfirm] = useState(null); // { type: 'email'|'sms' }
+
+  // ── Cookie / privacy preferences ──────────────────────────────────────
+  // Mirrors the choice made on the cookie-consent banner (see
+  // components/CookieConsentBanner.jsx) so it can be reviewed or changed
+  // later without clearing browser data — the Cookie Policy tells people
+  // this is possible, so it needs to actually work here.
+  const { user } = useAuth();
+  const [cookieChoice, setCookieChoice] = useState(() => getCookie(CONSENT_COOKIE)); // 'accepted' | 'declined' | null
+  const [legalModal, setLegalModal] = useState(null); // 'terms' | 'privacy' | 'cookies' | null
+
+  function acceptCookies() {
+    setCookie(CONSENT_COOKIE, 'accepted');
+    setCookieChoice('accepted');
+    if (user?.id) setCookieConsent(user.id, 'accepted');
+    toast('Convenience cookies enabled.', 'success');
+  }
+
+  function declineCookies() {
+    setCookie(CONSENT_COOKIE, 'declined');
+    deleteCookie(LAST_EMAIL_COOKIE); // honor the change immediately, don't wait for expiry
+    setCookieChoice('declined');
+    if (user?.id) setCookieConsent(user.id, 'declined');
+    toast('Convenience cookies disabled — your remembered email was cleared.', 'info');
+  }
 
   function requestEnableNotif(type) {
     const key = type === 'email' ? 'emailNotifs' : 'smsNotifs';
@@ -448,6 +476,53 @@ export default function SettingsPage() {
             />
           )}
         </SECTION>
+
+        {/* ── Privacy & Cookies ────────────────────────────────── */}
+        <SECTION icon={Cookie} title="Privacy & Cookies">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p className="text-sm font-medium text-ink-800">Convenience cookies</p>
+              <p className="text-xs text-ink-400 mt-0.5">
+                Remembers the email you last signed in with, so the sign-in form is pre-filled next time.
+                Strictly-necessary cookies (staying signed in, session-security rules) are separate and always on.
+              </p>
+              <p className="text-xs mt-1.5 font-medium" style={{ color: cookieChoice === 'accepted' ? '#16a34a' : '#94a3b8' }}>
+                Currently: {cookieChoice === 'accepted' ? 'Accepted' : cookieChoice === 'declined' ? 'Declined' : 'Not yet chosen'}
+              </p>
+            </div>
+            <div className="flex flex-col gap-1.5 shrink-0">
+              <button
+                onClick={acceptCookies}
+                disabled={cookieChoice === 'accepted'}
+                className="btn-primary btn-sm whitespace-nowrap disabled:opacity-50"
+              >
+                Accept
+              </button>
+              <button
+                onClick={declineCookies}
+                disabled={cookieChoice === 'declined'}
+                className="btn-secondary btn-sm whitespace-nowrap disabled:opacity-50"
+              >
+                Decline
+              </button>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-x-4 gap-y-1.5 pt-1 border-t border-surface-100 mt-1">
+            <button onClick={() => setLegalModal('terms')} className="text-xs font-semibold text-brand-600 hover:underline">
+              Terms of Service
+            </button>
+            <button onClick={() => setLegalModal('privacy')} className="text-xs font-semibold text-brand-600 hover:underline">
+              Privacy Policy
+            </button>
+            <button onClick={() => setLegalModal('cookies')} className="text-xs font-semibold text-brand-600 hover:underline">
+              Cookie Policy
+            </button>
+            <button onClick={() => setLegalModal('copyright')} className="text-xs font-semibold text-brand-600 hover:underline">
+              Copyright
+            </button>
+          </div>
+        </SECTION>
       </div>
 
       {/* ── Plan upgrade nudge (for non-enterprise) ───────── */}
@@ -519,6 +594,8 @@ export default function SettingsPage() {
           </div>
         </Modal>
       )}
+
+      {legalModal && <LegalModal type={legalModal} onClose={() => setLegalModal(null)} />}
     </div>
   );
 }

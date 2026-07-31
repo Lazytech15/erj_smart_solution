@@ -67,8 +67,10 @@ export default function SubscriptionPage() {
     ? new Date(subscription.billing.nextBillingDate).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
     : '—';
   const monthlyTotal = currentPlan?.price === 0 ? 'Free' : `₱${(seatsUsed * currentPlan.price).toFixed(2)}`;
-  const isTrial     = subscription.status === 'trialing';
-  const isCancelled = subscription.status === 'cancelled';
+  const isTrial       = subscription.status === 'trialing';
+  const isCancelled   = subscription.status === 'cancelled';
+  const isGracePeriod = subscription.status === 'grace_period';
+  const isSuspended   = subscription.status === 'suspended';
 
   function handleSelectPlan(planId) {
     if (planId === 'free_trial' && subscription.hasUsedTrial) return; // trial already consumed
@@ -145,6 +147,39 @@ export default function SubscriptionPage() {
         </div>
       )}
 
+      {/* Grace period banner — payment failed, but the system stays fully usable for 7 days */}
+      {isGracePeriod && (
+        <div className="flex items-center gap-3 p-4 rounded-xl bg-warning-50 border border-warning-200">
+          <AlertTriangle size={16} className="text-warning-600 shrink-0" />
+          <div className="flex-1">
+            <p className="text-sm font-semibold text-warning-800">Payment failed</p>
+            <p className="text-xs text-warning-600 mt-0.5">
+              We couldn't process your last payment. Update your billing details to avoid a suspension.
+            </p>
+          </div>
+          <button onClick={() => setChangePlanModal(true)} className="btn-primary btn-sm shrink-0">
+            Update billing
+          </button>
+        </div>
+      )}
+
+      {/* Suspended banner — logins/clock-ins are blocked app-wide except this page */}
+      {isSuspended && (
+        <div className="flex items-center gap-3 p-4 rounded-xl bg-danger-50 border border-danger-200">
+          <Lock size={16} className="text-danger-600 shrink-0" />
+          <div className="flex-1">
+            <p className="text-sm font-semibold text-danger-800">Account suspended</p>
+            <p className="text-xs text-danger-600 mt-0.5">
+              Access is locked due to unresolved billing. Your data is safe — reactivate to restore access.
+              Unresolved accounts are permanently deleted 30 days after suspension.
+            </p>
+          </div>
+          <button onClick={() => setChangePlanModal(true)} className="btn-danger btn-sm shrink-0">
+            Reactivate
+          </button>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         {/* Current plan card */}
         <div className="card p-5 lg:col-span-2">
@@ -154,8 +189,8 @@ export default function SubscriptionPage() {
               <div className="flex items-center gap-2">
                 <h3 className="text-xl font-bold text-ink-900">{currentPlan?.name}</h3>
                 <span className="text-[10px] font-bold px-2 py-0.5 rounded-full text-white"
-                  style={{ backgroundColor: currentPlan?.color }}>
-                  {isTrial ? 'TRIAL' : isCancelled ? 'CANCELLED' : 'ACTIVE'}
+                  style={{ backgroundColor: isSuspended ? '#ef5350' : isGracePeriod ? '#f59e0b' : currentPlan?.color }}>
+                  {isTrial ? 'TRIAL' : isCancelled ? 'CANCELLED' : isSuspended ? 'SUSPENDED' : isGracePeriod ? 'PAST DUE' : 'ACTIVE'}
                 </span>
               </div>
               <p className="text-xs text-ink-400 mt-0.5">

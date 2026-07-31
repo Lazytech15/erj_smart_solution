@@ -186,6 +186,41 @@ export async function putSubscription(state) {
   cacheInvalidate(`attendance:${state.subscriptionId}`);
 }
 
+// ─── Cookie-consent persistence ────────────────────────────────────────────
+// Mirrors the accept/decline choice from utils/cookies.js onto the logged-in
+// user's account row, so it survives a "clear browser data" instead of only
+// living in a cookie. Reads/writes are best-effort: a failure here should
+// never block the cookie banner or Settings page from working locally.
+
+export async function getCookieConsent(authUid) {
+  if (!authUid) return null;
+  try {
+    const { data, error } = await supabase
+      .from('accounts')
+      .select('cookie_consent')
+      .eq('auth_uid', authUid)
+      .maybeSingle();
+    if (error || !data) return null;
+    return data.cookie_consent ?? null;
+  } catch (err) {
+    console.error('[getCookieConsent] failed:', err?.message || err);
+    return null;
+  }
+}
+
+export async function setCookieConsent(authUid, value) {
+  if (!authUid) return;
+  try {
+    const { error } = await supabase
+      .from('accounts')
+      .update({ cookie_consent: value, cookie_consent_at: new Date().toISOString() })
+      .eq('auth_uid', authUid);
+    if (error) console.error('[setCookieConsent] write failed:', error.message);
+  } catch (err) {
+    console.error('[setCookieConsent] failed:', err?.message || err);
+  }
+}
+
 // ─── Pending Registrations helpers ─────────────────────────────────────────────
 
 /**
