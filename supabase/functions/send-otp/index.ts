@@ -67,13 +67,27 @@ Deno.serve(async (req) => {
     });
   }
 
+  const codeBoxes = code
+    .split("")
+    .map(
+      (digit) =>
+        `<td style="width:44px;height:52px;background:#f8fafc;border:1.5px solid #e2e8f0;border-radius:10px;text-align:center;vertical-align:middle;">
+           <span style="font-size:24px;font-weight:800;color:#1e293b;font-family:'Open Sans','Segoe UI',Helvetica,Arial,sans-serif;">${digit}</span>
+         </td>`
+    )
+    .join(`<td style="width:8px;"></td>`);
+
   const result = await sendEmail({
     to: email,
     subject: "Your verification code",
     heading: "Your verification code",
-    body: `<p>Use this code to confirm your request. It expires in 10 minutes.</p>
-           <p style="font-size:28px;font-weight:bold;letter-spacing:6px;text-align:center;margin:20px 0;">${code}</p>
-           <p style="color:#9aa0ac;">If you didn't request this, you can safely ignore this email.</p>`,
+    body: `<p style="margin:0 0 22px;color:#475569;">Use this code to confirm your request. It expires in <strong>10 minutes</strong>.</p>
+           <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 auto 22px;">
+             <tr>${codeBoxes}</tr>
+           </table>
+           <p style="margin:0;padding:14px 16px;background:#f8fafc;border-radius:10px;color:#94a3b8;font-size:12.5px;line-height:1.6;">
+             If you didn't request this, you can safely ignore this email — no changes will be made to your account.
+           </p>`,
   });
 
   if (!result.ok) {

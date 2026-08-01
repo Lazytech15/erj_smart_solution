@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
-import { getSubscription, putSubscription, getAttendanceRecords, putAttendanceRecords, getPendingRegistrations, insertPendingRegistration, updatePendingRegistration, deletePendingRegistration, createEmployeeAccount, updateEmployeeAccount, getEmployeeAccount } from '../utils/db';
+import { getSubscription, putSubscription, deleteSubscriptionRow, getAttendanceRecords, putAttendanceRecords, getPendingRegistrations, insertPendingRegistration, updatePendingRegistration, deletePendingRegistration, createEmployeeAccount, updateEmployeeAccount, getEmployeeAccount } from '../utils/db';
 import { forceResetStuckAuthState, notifySupabaseRequestSucceeded } from '../utils/supabase';
 import { cacheForceClearInFlight } from '../utils/cache';
 import { useAuth } from './AuthContext';
@@ -398,6 +398,29 @@ export function SubscriptionProvider({ children }) {
     return state;
   }, []); // eslint-disable-line
 
+  // ── discardSubscription() — rolls back a subscribe() that didn't finish ──
+  // signup's handleSubmit calls subscribe() (which persists the row) BEFORE
+  // registerCompanyAdmin() creates the actual account. If account creation
+  // fails — bad password, network error, duplicate email, etc. — the
+  // subscription row would otherwise be left behind, and a retry from the
+  // same signup form calls subscribe() again with a brand-new
+  // subscriptionId, leaving the old orphaned row AND creating a new one
+  // (duplicate company entries). Call this from the catch block whenever
+  // subscribe() succeeded but a later step in the same flow failed.
+  const discardSubscription = useCallback(async (subscriptionId) => {
+    if (!subscriptionId) return;
+    try {
+      await deleteSubscriptionRow(subscriptionId);
+    } finally {
+      // Clear local state regardless of whether the remote delete
+      // succeeded — an orphaned row still in Supabase is a lesser problem
+      // than the UI believing there's now an active subscription.
+      if (subRef.current?.subscriptionId === subscriptionId) {
+        setSubscription(null);
+      }
+    }
+  }, []);
+
   // ── Employees ────────────────────────────────────────────────────────────────
   const enrollEmployee = useCallback(async (employee) => {
     // Generate the ID once here so both the enrolledEmployees entry and
@@ -525,10 +548,27 @@ export function SubscriptionProvider({ children }) {
       console.warn('[updateEmployee] account sync failed:', err.message);
     }
   }, [update]);
-  const cancelSubscription = useCallback(()        => update(prev => ({ ...prev, status: 'cancelled' })), [update]);
+  // Used to lock the client out immediately — now just flags the intent;
+  // access continues (status is untouched) until subscription-lifecycle's
+  // daily run sees nextBillingDate has passed and flips status to
+  // 'cancelled' for real. See migrations/20260801020000_cancel_at_period_end.sql.
+  const cancelSubscription = useCallback(()        => update(prev => ({ ...prev, cancelAtPeriodEnd: true })), [update]);
+  // Undo a pending cancellation before the period actually ends.
+  const reactivateSubscription = useCallback(()    => update(prev => ({ ...prev, cancelAtPeriodEnd: false })), [update]);
   const upgradePlan        = useCallback((planId)  => update(prev => {
     if (planId === 'free_trial' && prev.hasUsedTrial) {
       throw new Error('The free trial has already been used on this account.');
+    }
+    const targetPlan = PLANS.find(p => p.id === planId);
+    const seatsUsed = prev.enrolledEmployees?.length ?? 0;
+    // Without this, a plan change could leave more employees enrolled than
+    // the new plan allows — nothing else in the app currently re-validates
+    // that after the fact.
+    if (targetPlan && targetPlan.maxSeats !== Infinity && seatsUsed > targetPlan.maxSeats) {
+      throw new Error(
+        `${targetPlan.name} allows up to ${targetPlan.maxSeats} employees, but you have ${seatsUsed} enrolled. ` +
+        'Remove some employees before switching to this plan.'
+      );
     }
     return { ...prev, planId, status: 'active' };
   }), [update]);
@@ -786,14 +826,20 @@ export function SubscriptionProvider({ children }) {
     ? Math.max(0, Math.ceil((new Date(subscription.trialEndsAt) - Date.now()) / (1000*60*60*24)))
     : 0;
 
+  const refreshSubscription = useCallback(() => {
+    if (!user?.subscriptionId) return Promise.resolve(false);
+    return loadSubscription(user.subscriptionId);
+  }, [user?.subscriptionId, loadSubscription]);
+
   return (
     <SubscriptionContext.Provider value={{
       subscription, loading, currentPlan, seatsUsed, seatsAvailable, trialDaysLeft,
       pendingEmployees,
       setPendingEmployeesExternal: setPendingEmployees,
-      subscribe, enrollEmployee, removeEmployee, updateEmployee,
+      subscribe, discardSubscription, enrollEmployee, removeEmployee, updateEmployee,
       submitRegistration, editPendingRegistration, approveEmployee, rejectEmployee,
-      cancelSubscription, upgradePlan, clearSubscription, updateSettings, completeOnboarding,
+      cancelSubscription, reactivateSubscription, upgradePlan, clearSubscription, updateSettings, completeOnboarding,
+      refreshSubscription,
       addAttendanceRecord, updateAttendanceRecord,
       addLeaveRequest, updateLeaveRequest,
       addLeaveType, updateLeaveType, removeLeaveType,

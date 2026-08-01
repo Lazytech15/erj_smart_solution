@@ -30,7 +30,7 @@ Deno.serve(async (req) => {
 
   try {
     const body = await req.json();
-    const { subscriptionId, planId, planName, amountPhp, seats, email, successUrl, cancelUrl } = body;
+    const { subscriptionId, planId, planName, amountPhp, seats, email, successUrl, cancelUrl, changeType } = body;
 
     if (!subscriptionId || !planId || !amountPhp) {
       return new Response(JSON.stringify({ ok: false, error: "subscriptionId, planId, and amountPhp are required" }), {
@@ -61,8 +61,11 @@ Deno.serve(async (req) => {
           payment_method_types: ["card", "gcash", "paymaya"],
           description: `ERJ Smart Solutions — ${planName ?? planId} plan`,
           // Round-trips through PayMongo untouched — our webhook reads this
-          // back to know which subscription row to update.
-          metadata: { subscriptionId, planId },
+          // back to know which subscription row to update, and (when
+          // present) whether this is a prorated mid-cycle plan-change
+          // charge rather than a normal signup/renewal — see
+          // paymongo-webhook for what that changes.
+          metadata: { subscriptionId, planId, ...(changeType ? { changeType } : {}) },
           success_url: successUrl ?? "https://eablao.dev/app/subscription?checkout=success",
           cancel_url: cancelUrl ?? "https://eablao.dev/app/subscription?checkout=cancelled",
         },

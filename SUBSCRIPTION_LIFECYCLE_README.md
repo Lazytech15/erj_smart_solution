@@ -16,6 +16,7 @@
    supabase secrets set RESEND_API_KEY=re_xxxxxxxx
    supabase secrets set RESEND_FROM="ERJ Smart Solutions <no-reply@yourdomain.com>"
    supabase secrets set SUBSCRIPTION_LIFECYCLE_SECRET=<same secret as in the SQL>
+   supabase secrets set APP_URL=https://yourdomain.com   # links the payment-reminder emails to /app/subscription
    ```
    (`SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` are already injected automatically for edge functions.)
 3. **Deploy**:

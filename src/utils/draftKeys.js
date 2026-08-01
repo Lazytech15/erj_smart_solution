@@ -110,9 +110,11 @@ export function isDepartmentFormMeaningful(draft) {
 
 // ── Signup (pre-auth, so no userId — keyed per plan so switching plans
 // on the pricing page doesn't bleed one company's draft into another) ──
-// Passwords and card details are deliberately never persisted here — only
-// the non-sensitive fields (company info, name, email, current step) are
-// worth restoring; the person retypes their password either way.
+// Only the non-sensitive fields (company info, name, email, current step)
+// live in this localStorage draft. Passwords and card details are
+// restorable too, but through a separate encrypted sessionStorage draft —
+// see useSensitiveFormDraft / utils/sensitiveDraft.js — keyed off
+// `${signupDraftKey(planId)}:sensitive`.
 export function signupDraftKey(planId) {
   return `draft:signup:${planId || 'default'}`;
 }

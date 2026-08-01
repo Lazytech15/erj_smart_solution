@@ -9,8 +9,10 @@ import { supabase } from '../../utils/supabase';
 import PasswordStrengthField, { isPasswordStrong } from '../../components/PasswordStrengthField';
 import LegalModal from '../../components/LegalModal';
 import { useFormDraft } from '../../hooks/useFormDraft';
+import { useSensitiveFormDraft } from '../../hooks/useSensitiveFormDraft';
 import { signupDraftKey, isSignupFormMeaningful } from '../../utils/draftKeys';
 import DraftRestoredBanner from '../../components/DraftRestoredBanner';
+import OtpInput from '../../components/OtpInput';
 
 const OTP_PURPOSE = 'signup_verification';
 const RESEND_COOLDOWN_SECONDS = 30;
@@ -38,7 +40,7 @@ export default function SignupPage() {
 
   const navigate = useNavigate();
   const toast = useToast();
-  const { subscribe } = useSubscription();
+  const { subscribe, discardSubscription } = useSubscription();
   const { registerCompanyAdmin } = useAuth();
 
   const [step, setStep] = useState(0);
@@ -48,38 +50,11 @@ export default function SignupPage() {
 
   const [company, setCompany] = useState({ name: '', industry: 'Technology', size: '11–50', address: '' });
   const [account, setAccount] = useState({ adminName: '', adminEmail: '', password: '', confirmPassword: '' });
-  const [billing, setBilling] = useState({ cardNumber: '', expiry: '', cvv: '', cardName: '' });
 
   const cf = k => v => setCompany(p => ({ ...p, [k]: v }));
   const af = k => v => setAccount(p => ({ ...p, [k]: v }));
-  const bf = k => v => setBilling(p => ({ ...p, [k]: v }));
 
   const [errors, setErrors] = useState({});
-
-  // ── Draft persistence (survives accidental reload / tab discard) ──
-  // Only non-sensitive fields are saved — passwords and card details never
-  // touch localStorage, so a restored draft always still needs those retyped.
-  const [draftRestored, setDraftRestored] = useState(false);
-  const draftKey = signupDraftKey(planId);
-  const { clear: clearFormDraft } = useFormDraft(
-    draftKey,
-    { step, company, account: { adminName: account.adminName, adminEmail: account.adminEmail } },
-    {
-      isMeaningful: isSignupFormMeaningful,
-      onRestore: (draft) => {
-        if (draft.company) setCompany(prev => ({ ...prev, ...draft.company }));
-        if (draft.account) setAccount(prev => ({ ...prev, adminName: draft.account.adminName || '', adminEmail: draft.account.adminEmail || '' }));
-        if (typeof draft.step === 'number' && draft.step < STEPS.length) setStep(draft.step);
-        setDraftRestored(true);
-        toast('Restored your signup details from before the page reloaded. Please re-enter your password.', 'info');
-      },
-    }
-  );
-
-  function discardDraft() {
-    clearFormDraft();
-    setDraftRestored(false);
-  }
 
   // ── Email OTP verification ──
   const [otpStatus, setOtpStatus] = useState('idle'); // idle | sending | sent | verifying | verified
@@ -104,51 +79,187 @@ export default function SignupPage() {
 
   const emailIsVerified = otpStatus === 'verified' && verifiedEmail === account.adminEmail;
 
+  // ── Draft persistence (survives accidental reload / tab discard) ──
+  // Non-sensitive fields (company info, name, email, step, verification
+  // status) are saved to localStorage and last up to 24h. Passwords and
+  // card details are saved separately, encrypted, to sessionStorage (see
+  // useSensitiveFormDraft below) — they still survive a reload, but never
+  // sit on disk and disappear the moment the tab is closed.
+  // We DO persist "a code was sent to this email" and "this email was
+  // verified" (never the code itself — that only ever exists as a hash
+  // server-side) so a reload doesn't throw away a completed verification
+  // or hide the code-entry box while the emailed code is still valid.
+  const [draftRestored, setDraftRestored] = useState(false);
+  const [draftRestoreMessage, setDraftRestoreMessage] = useState('');
+  const draftKey = signupDraftKey(planId);
+  const sensitiveDraftKey = `${draftKey}:sensitive`;
+
+  // Tracks whether the encrypted sensitive draft (password/card) has
+  // finished its once-on-mount restore attempt yet, so the two restore
+  // paths (plain + sensitive) can be combined into a single banner message
+  // instead of flashing two separate toasts.
+  const sensitiveRestoredRef = useRef({ hadPassword: false });
+
+  const { clear: clearFormDraft } = useFormDraft(
+    draftKey,
+    {
+      step,
+      company,
+      account: { adminName: account.adminName, adminEmail: account.adminEmail },
+      otpSent: otpStatus === 'sent' || otpStatus === 'verifying',
+      otpVerified: emailIsVerified,
+    },
+    {
+      isMeaningful: isSignupFormMeaningful,
+      onRestore: (draft) => {
+        if (draft.company) setCompany(prev => ({ ...prev, ...draft.company }));
+        if (draft.account) setAccount(prev => ({ ...prev, adminName: draft.account.adminName || '', adminEmail: draft.account.adminEmail || '' }));
+        if (typeof draft.step === 'number' && draft.step < STEPS.length) setStep(draft.step);
+        if (draft.otpVerified && draft.account?.adminEmail) {
+          setOtpStatus('verified');
+          setVerifiedEmail(draft.account.adminEmail);
+        } else if (draft.otpSent && draft.account?.adminEmail) {
+          setOtpStatus('sent');
+        }
+        setDraftRestored(true);
+        announceRestore();
+      },
+    }
+  );
+
+  // Sensitive fields (password, confirm-password, card details) — kept out
+  // of the plain draft above and restored separately from encrypted
+  // sessionStorage, so going Back a step (or an accidental reload) never
+  // silently empties the password field and breaks submit downstream.
+  const { clear: clearSensitiveDraft } = useSensitiveFormDraft(
+    sensitiveDraftKey,
+    {
+      password: account.password,
+      confirmPassword: account.confirmPassword,
+    },
+    {
+      isMeaningful: (d) => Boolean(d.password),
+      onRestore: (draft) => {
+        if (draft.password || draft.confirmPassword) {
+          setAccount(prev => ({
+            ...prev,
+            password: draft.password || prev.password,
+            confirmPassword: draft.confirmPassword || prev.confirmPassword,
+          }));
+          sensitiveRestoredRef.current.hadPassword = true;
+        }
+        setDraftRestored(true);
+        announceRestore();
+      },
+    }
+  );
+
+  // Combines whichever of the two restores actually fired into one banner
+  // message. Both hooks restore once on mount (order isn't guaranteed), so
+  // this recomputes the message each time either one reports in.
+  function announceRestore() {
+    const { hadPassword } = sensitiveRestoredRef.current;
+    let message = 'Restored your signup details from before the page reloaded.';
+    if (hadPassword) message += ' Your password was restored too.';
+    setDraftRestoreMessage(message);
+  }
+
+  function discardDraft() {
+    clearFormDraft();
+    clearSensitiveDraft();
+    setDraftRestored(false);
+  }
+
   function isValidEmail(v) {
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
   }
+
+  function humanizeOtpError(message, fallback) {
+    const m = (message || '').toLowerCase();
+    if (!m) return fallback;
+    if (m.includes('incorrect code')) return "That code doesn't look right. Please try again.";
+    if (m.includes('expired')) return 'This code has expired. Send a new one and try again.';
+    if (m.includes('no active code')) return 'This code is no longer valid. Send a new one and try again.';
+    if (m.includes('non-2xx') || m.includes('failed to fetch') || m.includes('networkerror') || m.includes('load failed')) {
+      return fallback;
+    }
+    if (m.includes('required')) return 'Enter the 6-digit code';
+    return message || fallback;
+  }
+
+  async function extractFunctionError(error, data) {
+    if (data?.error) return data.error;
+    const ctx = error && error.context;
+    if (ctx && typeof ctx.json === 'function') {
+      try {
+        const clone = typeof ctx.clone === 'function' ? ctx.clone() : ctx;
+        const body = await clone.json();
+        if (body?.error) return body.error;
+      } catch {
+        // response body wasn't JSON or already consumed - fall through
+      }
+    }
+    return error?.message;
+  }
+
+  const otpErrorTimeoutRef = useRef(null);
+  function showOtpError(message) {
+    setOtpError(message);
+    clearTimeout(otpErrorTimeoutRef.current);
+    if (message) {
+      otpErrorTimeoutRef.current = setTimeout(() => setOtpError(''), 10000);
+    }
+  }
+  useEffect(() => () => clearTimeout(otpErrorTimeoutRef.current), []);
 
   async function sendOtp() {
     if (!isValidEmail(account.adminEmail)) {
       setErrors(prev => ({ ...prev, adminEmail: 'Enter a valid email before sending a code' }));
       return;
     }
-    setOtpError('');
+    showOtpError('');
     setOtpStatus('sending');
     try {
       const { data, error } = await supabase.functions.invoke('send-otp', {
         body: { email: account.adminEmail, purpose: OTP_PURPOSE },
       });
-      if (error || !data?.ok) throw new Error(data?.error || error?.message || 'Failed to send code');
+      if (error || !data?.ok) {
+        const raw = await extractFunctionError(error, data);
+        throw new Error(raw);
+      }
       setOtpStatus('sent');
       setOtpCode('');
       startResendCooldown();
       toast(`Verification code sent to ${account.adminEmail}`, 'success');
     } catch (err) {
       setOtpStatus('idle');
-      setOtpError(err.message || 'Failed to send code. Please try again.');
+      showOtpError(humanizeOtpError(err.message, "We couldn't send the code. Please try again."));
     }
   }
 
-  async function verifyOtp() {
-    if (otpCode.trim().length !== 6) {
-      setOtpError('Enter the 6-digit code');
+  async function verifyOtp(codeOverride) {
+    const code = (codeOverride ?? otpCode).trim();
+    if (code.length !== 6) {
+      showOtpError('Enter the 6-digit code');
       return;
     }
-    setOtpError('');
+    showOtpError('');
     setOtpStatus('verifying');
     try {
       const { data, error } = await supabase.functions.invoke('verify-otp', {
-        body: { email: account.adminEmail, purpose: OTP_PURPOSE, code: otpCode.trim() },
+        body: { email: account.adminEmail, purpose: OTP_PURPOSE, code },
       });
-      if (error || !data?.ok) throw new Error(data?.error || error?.message || 'Incorrect code');
+      if (error || !data?.ok) {
+        const raw = await extractFunctionError(error, data);
+        throw new Error(raw);
+      }
       setOtpStatus('verified');
       setVerifiedEmail(account.adminEmail);
-      setOtpError('');
+      showOtpError('');
       setErrors(prev => ({ ...prev, adminEmail: undefined }));
     } catch (err) {
       setOtpStatus('sent');
-      setOtpError(err.message || 'Incorrect or expired code');
+      showOtpError(humanizeOtpError(err.message, "That code doesn't look right. Please try again."));
     }
   }
 
@@ -159,6 +270,7 @@ export default function SignupPage() {
       setOtpStatus('idle');
       setOtpCode('');
       setOtpError('');
+      clearTimeout(otpErrorTimeoutRef.current);
       setVerifiedEmail('');
       setResendCooldown(0);
       clearInterval(cooldownRef.current);
@@ -180,10 +292,6 @@ export default function SignupPage() {
       if (account.password !== account.confirmPassword) e.confirmPassword = 'Passwords do not match';
     }
     if (step === 2 && !isTrialPlan) {
-      if (billing.cardNumber.replace(/\s/g, '').length < 16) e.cardNumber = 'Enter a valid card number';
-      if (!billing.expiry.match(/^\d{2}\/\d{2}$/)) e.expiry = 'Format: MM/YY';
-      if (billing.cvv.length < 3) e.cvv = 'Enter CVV';
-      if (!billing.cardName.trim()) e.cardName = 'Name on card required';
       if (!agreedToTerms) e.terms = 'You must agree to the terms to continue';
     }
     setErrors(e);
@@ -198,15 +306,10 @@ export default function SignupPage() {
   async function handleSubmit() {
     if (!validateStep()) return;
     setLoading(true);
+    let newSub;
     try {
       await new Promise(r => setTimeout(r, 1200));
-      const newSub = await subscribe(planId, { ...company, adminName: account.adminName, adminEmail: account.adminEmail },
-        isTrialPlan ? null : {
-          card4: billing.cardNumber.slice(-4),
-          expiry: billing.expiry,
-          cardName: billing.cardName,
-        }
-      );
+      newSub = await subscribe(planId, { ...company, adminName: account.adminName, adminEmail: account.adminEmail }, null);
       await registerCompanyAdmin({
         adminName: account.adminName,
         adminEmail: account.adminEmail,
@@ -215,25 +318,31 @@ export default function SignupPage() {
       });
       // registerCompanyAdmin already signs the user in — no need to call login() again.
       clearFormDraft();
+      clearSensitiveDraft();
       toast(
         isTrialPlan
           ? 'Your 14-day free trial has started. Welcome!'
-          : 'Subscription activated! Welcome to ERJ.',
+          : 'Account created! Add your team, then finish setup to complete payment.',
         'success'
       );
       navigate('/onboard');
     } catch (err) {
+      // subscribe() already wrote the subscription row to Supabase before
+      // registerCompanyAdmin ran — if that (or anything after it) failed,
+      // the row would otherwise be left behind as an orphan with no linked
+      // account, and retrying would create ANOTHER one on top of it
+      // (duplicate company entries). Roll it back so a retry starts clean.
+      if (newSub?.subscriptionId) {
+        try {
+          await discardSubscription(newSub.subscriptionId);
+        } catch (rollbackErr) {
+          console.error('[SignupPage] failed to roll back orphaned subscription:', rollbackErr);
+        }
+      }
       toast(err.message || 'Something went wrong', 'error');
     } finally {
       setLoading(false);
     }
-  }
-
-  function formatCard(val) {
-    return val.replace(/\D/g, '').slice(0, 16).replace(/(.{4})/g, '$1 ').trim();
-  }
-  function formatExpiry(val) {
-    return val.replace(/\D/g, '').slice(0, 4).replace(/^(\d{2})(\d)/, '$1/$2');
   }
 
   const isFinalStep = step === STEPS.length - 1;
@@ -397,7 +506,7 @@ export default function SignupPage() {
               {draftRestored && (
                 <DraftRestoredBanner
                   className="mb-4"
-                  message="Restored your signup details from before the page reloaded. Please re-enter your password."
+                  message={draftRestoreMessage || 'Restored your signup details from before the page reloaded.'}
                   onDiscard={discardDraft}
                 />
               )}
@@ -474,29 +583,27 @@ export default function SignupPage() {
                     {errors.adminEmail && <p className={errorClass}>{errors.adminEmail}</p>}
 
                     {(otpStatus === 'sent' || otpStatus === 'verifying') && (
-                      <div className="mt-2.5 flex items-start gap-2 p-3 rounded-xl" style={{ background: '#f8fafc', border: '1px solid #e2e8f0' }}>
-                        <div className="flex-1">
-                          <p className="text-xs text-slate-500 mb-2">
-                            Enter the 6-digit code we sent to <span className="font-semibold text-slate-700">{account.adminEmail}</span>
-                          </p>
-                          <div className="flex items-center gap-2">
-                            <input
-                              type="text"
-                              inputMode="numeric"
-                              maxLength={6}
-                              value={otpCode}
-                              onChange={e => { setOtpCode(e.target.value.replace(/\D/g, '').slice(0, 6)); setOtpError(''); }}
-                              placeholder="000000"
-                              className="w-28 px-3 py-2 rounded-lg text-sm font-mono tracking-[0.3em] text-center bg-white border border-slate-200 outline-none focus:border-indigo-400 focus:ring-2"
-                            />
-                            <button type="button" onClick={verifyOtp} disabled={otpStatus === 'verifying' || otpCode.length !== 6}
-                              className="flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-bold text-white transition-all"
-                              style={{ background: (otpStatus === 'verifying' || otpCode.length !== 6) ? '#a5b4fc' : 'linear-gradient(135deg, #6366f1, #4f46e5)' }}>
-                              {otpStatus === 'verifying' ? <Loader2 size={13} className="animate-spin" /> : 'Verify'}
-                            </button>
-                          </div>
-                          {otpError && <p className={errorClass}>{otpError}</p>}
+                      <div className="mt-2.5 p-4 rounded-xl" style={{ background: '#f8fafc', border: '1px solid #e2e8f0' }}>
+                        <p className="text-xs text-slate-500 mb-3 text-center">
+                          Enter the 6-digit code we sent to <span className="font-semibold text-slate-700">{account.adminEmail}</span>
+                        </p>
+                        <OtpInput
+                          length={6}
+                          value={otpCode}
+                          disabled={otpStatus === 'verifying'}
+                          error={Boolean(otpError)}
+                          autoFocus
+                          onChange={code => { setOtpCode(code); setOtpError(''); }}
+                          onComplete={verifyOtp}
+                        />
+                        <div className="flex justify-center mt-3">
+                          <button type="button" onClick={() => verifyOtp()} disabled={otpStatus === 'verifying' || otpCode.length !== 6}
+                            className="flex items-center justify-center gap-1.5 px-5 py-2 rounded-lg text-xs font-bold text-white transition-all"
+                            style={{ background: (otpStatus === 'verifying' || otpCode.length !== 6) ? '#a5b4fc' : 'linear-gradient(135deg, #6366f1, #4f46e5)' }}>
+                            {otpStatus === 'verifying' ? <Loader2 size={13} className="animate-spin" /> : 'Verify'}
+                          </button>
                         </div>
+                        {otpError && <p className={`${errorClass} text-center`}>{otpError}</p>}
                       </div>
                     )}
                     {otpStatus === 'idle' && otpError && <p className={`${errorClass} mt-1`}>{otpError}</p>}
@@ -529,52 +636,33 @@ export default function SignupPage() {
                 </div>
               )}
 
-              {/* Step 2: Billing */}
+              {/* Step 2: Plan review (no card fields — payment happens on PayMongo's
+                  hosted Checkout page at "Finish setup", once seats are known) */}
               {step === 2 && !isTrialPlan && (
                 <div className="space-y-4">
                   <div className="flex items-start gap-2 p-3 rounded-xl text-xs"
                     style={{ background: 'rgba(99,102,241,0.06)', border: '1px solid rgba(99,102,241,0.15)', color: '#4338ca' }}>
                     <Check size={13} className="mt-0.5 shrink-0" />
-                    Your subscription activates immediately. Billed monthly per enrolled employee.
-                  </div>
-                  <div>
-                    <label className={labelClass}>Card Number</label>
-                    <input type="text" className={`${inputClass} font-mono ${errors.cardNumber ? 'border-red-400' : ''}`}
-                      value={billing.cardNumber} onChange={e => bf('cardNumber')(formatCard(e.target.value))}
-                      placeholder="1234 5678 9012 3456" maxLength={19} />
-                    {errors.cardNumber && <p className={errorClass}>{errors.cardNumber}</p>}
-                  </div>
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className={labelClass}>Expiry</label>
-                      <input type="text" className={`${inputClass} font-mono ${errors.expiry ? 'border-red-400' : ''}`}
-                        value={billing.expiry} onChange={e => bf('expiry')(formatExpiry(e.target.value))}
-                        placeholder="MM/YY" maxLength={5} />
-                      {errors.expiry && <p className={errorClass}>{errors.expiry}</p>}
-                    </div>
-                    <div>
-                      <label className={labelClass}>CVV</label>
-                      <input type="text" className={`${inputClass} font-mono ${errors.cvv ? 'border-red-400' : ''}`}
-                        value={billing.cvv} onChange={e => bf('cvv')(e.target.value.replace(/\D/g, '').slice(0, 4))}
-                        placeholder="•••" />
-                      {errors.cvv && <p className={errorClass}>{errors.cvv}</p>}
-                    </div>
-                  </div>
-                  <div>
-                    <label className={labelClass}>Name on Card</label>
-                    <input className={`${inputClass} ${errors.cardName ? 'border-red-400' : ''}`}
-                      value={billing.cardName} onChange={e => bf('cardName')(e.target.value)} placeholder="Maria Santos" />
-                    {errors.cardName && <p className={errorClass}>{errors.cardName}</p>}
+                    You'll enter your payment details securely on the next screen, once you've enrolled your team.
                   </div>
                   <div className="rounded-xl p-4 space-y-2" style={{ background: '#f8fafc' }}>
                     <div className="flex justify-between text-xs text-slate-500">
                       <span>Plan</span>
                       <span className="font-semibold">{plan.name} — ${plan.price}/emp/mo</span>
                     </div>
-                    <div className="flex justify-between text-xs pt-2" style={{ borderTop: '1px solid #e2e8f0' }}>
-                      <span className="text-slate-500">Due today (0 employees enrolled)</span>
-                      <span className="font-bold text-slate-900">$0.00</span>
+                    <div className="pt-2 text-xs text-slate-500" style={{ borderTop: '1px solid #e2e8f0' }}>
+                      Billed monthly per enrolled employee. You won't be charged until you finish setting up your workspace.
                     </div>
+                  </div>
+                  <div>
+                    <label className={labelClass}>What's included</label>
+                    <ul className="space-y-1.5 mt-1">
+                      {plan.features.slice(0, 6).map(f => (
+                        <li key={f} className="flex items-start gap-1.5 text-xs text-slate-600">
+                          <Check size={11} className="mt-0.5 shrink-0" style={{ color: '#6366f1' }} /> {f}
+                        </li>
+                      ))}
+                    </ul>
                   </div>
 
                   {/* ── Terms & Conditions checkbox ── */}
@@ -656,7 +744,7 @@ export default function SignupPage() {
                     }}>
                     {loading ? <Spinner size={14} /> : isTrialPlan
                       ? <><Zap size={14} /> Start free trial <ArrowRight size={14} /></>
-                      : <>Subscribe <ArrowRight size={14} /></>
+                      : <>Continue to setup <ArrowRight size={14} /></>
                     }
                   </button>
                 )}

@@ -394,6 +394,16 @@ verify_jwt = false
 [functions.verify-otp]
 verify_jwt = false
 
+# PayMongo calls this directly as a server-to-server webhook — it has no
+# Supabase session/JWT to send. Without this, Supabase's own gateway rejects
+# every webhook call with 401 before paymongo-webhook/index.ts ever runs,
+# which means the subscription row never actually gets flipped to "active"
+# no matter how many times the payment succeeds on PayMongo's side. Setting
+# this in config.toml (rather than relying on `--no-verify-jwt` at deploy
+# time) makes it stick across every redeploy, not just the first one.
+[functions.paymongo-webhook]
+verify_jwt = false
+
 # [edge_runtime.secrets]
 # secret_key = "env(SECRET_VALUE)"
 

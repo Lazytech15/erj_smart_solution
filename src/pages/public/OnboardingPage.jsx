@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Users, UserPlus, Check, ArrowRight, Upload,
   Trash2, ChevronDown, ChevronUp, AlertCircle, RefreshCw, PenLine, Wand2, Download
@@ -8,6 +8,8 @@ import { useSubscription } from '../../context/SubscriptionContext';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { getSubscription } from '../../utils/db';
+import { cacheInvalidate } from '../../utils/cache';
+import { startCheckout } from '../../utils/paymongo';
 import { generateEmployeeCode, downloadCSVTemplate, parseCSV } from '../../utils/csvImport';
 import { onboardingEmployeeDraftKey, isAddEmployeeFormMeaningful } from '../../utils/employeeDraft';
 import { useFormDraft } from '../../hooks/useFormDraft';
@@ -273,11 +275,12 @@ function EmployeeForm({ onAdd, seatsAvailable, currentPlan, existingCodes, depar
 ───────────────────────────────────────────── */
 export default function OnboardingPage() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const toast = useToast();
-  const { commitLogin } = useAuth();
+  const { commitLogin, authReady } = useAuth();
   const {
     subscription, loading, currentPlan, seatsUsed, seatsAvailable,
-    enrollEmployee, removeEmployee, completeOnboarding,
+    enrollEmployee, removeEmployee, completeOnboarding, refreshSubscription,
   } = useSubscription();
   const [saving, setSaving] = useState(false);
   const [transitioning, setTransitioning] = useState(false);
@@ -285,6 +288,122 @@ export default function OnboardingPage() {
   const [expanded, setExpanded] = useState(null);
   const [csvErrors, setCsvErrors] = useState([]);
   const [csvImporting, setCsvImporting] = useState(false);
+  // 'confirming' while we're polling Supabase for the webhook's write,
+  // 'timeout' if it never lands in time — see the effect below.
+  const [paymentCheck, setPaymentCheck] = useState(null);
+  const isTrialPlan = subscription?.planId === 'free_trial';
+
+  // How many times / how often to poll `subscriptions.status` before
+  // showing the "still waiting" card below. This is intentionally short —
+  // it's just when we switch from a full-screen spinner to the reassuring
+  // "still confirming" message, NOT a hard giveup. See the auto-retry
+  // effect below: PayMongo's webhook delivery can legitimately land after
+  // this window (a few seconds to over a minute in test mode), and without
+  // it retrying itself, this screen just sat there until the person noticed
+  // and clicked "Check again" — which from the outside looked identical to
+  // "returned from checkout and just got stuck on /onboard".
+  const PAYMENT_POLL_INTERVAL_MS = 1500;
+  const PAYMENT_POLL_MAX_ATTEMPTS = 10; // ~15s of the full-screen spinner
+  const AUTO_RETRY_INTERVAL_MS = 5000; // background retry cadence once we're on the "still confirming" card
+
+  // Polls Supabase directly for the subscription actually being flipped to
+  // "active", instead of trusting ?checkout=success on its own. PayMongo's
+  // hosted Checkout page sends the browser back here as soon as the *card*
+  // succeeds, but the write that matters (paymongo-webhook flipping
+  // `status` to "active") happens asynchronously, on PayMongo's own
+  // schedule, and can lag behind that redirect by a few seconds — or never
+  // arrive at all if the webhook is misconfigured or the call fails.
+  // Previously this effect completed onboarding the instant the query param
+  // showed up, so a slow/failed webhook meant the admin got dropped onto a
+  // subscription that PrivateRoute still saw as unpaid/trialing (or that
+  // just never left the loading state), which is what looked like the page
+  // "reloading"/getting stuck after returning from checkout.
+  async function confirmPaymentAndFinish(subscriptionId) {
+    setSaving(true);
+    setPaymentCheck('confirming');
+
+    let confirmed = false;
+    let fresh = null;
+    for (let attempt = 0; attempt < PAYMENT_POLL_MAX_ATTEMPTS; attempt++) {
+      cacheInvalidate(`subscription:${subscriptionId}`);
+      fresh = await getSubscription(subscriptionId);
+      if (fresh?.status === 'active') { confirmed = true; break; }
+      await new Promise(r => setTimeout(r, PAYMENT_POLL_INTERVAL_MS));
+    }
+
+    if (!confirmed) {
+      setSaving(false);
+      setPaymentCheck('timeout');
+      toast('Still confirming your payment with PayMongo — this can take a moment.', 'info');
+      return;
+    }
+
+    setPaymentCheck(null);
+    try {
+      // IMPORTANT: pull the webhook's write (status: "active", the rolled
+      // billing.nextBillingDate, paymongo_payment_id) into local state
+      // *before* completeOnboarding() runs. completeOnboarding() persists
+      // via update(), which patches onboardingComplete onto whatever
+      // subRef.current currently holds and writes the *entire* row back —
+      // and subRef.current at this point is still the snapshot fetched when
+      // this page first loaded, from before the checkout redirect (still
+      // showing the pre-payment status). Skipping this refresh meant that
+      // write silently clobbered the webhook's activation with stale data
+      // immediately after confirming it, which is what looked like "payment
+      // succeeds, status briefly shows active, then the admin gets bounced
+      // back to /onboard" (PrivateRoute/PublicRoute both send anyone with
+      // onboardingComplete === false back there).
+      await refreshSubscription();
+      await completeOnboarding();
+    } catch (err) {
+      // Don't pretend this succeeded — completeOnboarding() failing here
+      // means onboarding_complete never got flipped to true in Supabase, so
+      // sending the user into the dashboard transition anyway just means
+      // PrivateRoute bounces them straight back to /onboard on the very
+      // next render. Surface it and let them retry instead.
+      console.warn('[Onboarding] completeOnboarding failed:', err.message);
+      setSaving(false);
+      setPaymentCheck('timeout');
+      toast('Payment confirmed, but we couldn\'t finish setting up your workspace. Please try again.', 'error');
+      return;
+    }
+    setSaving(false);
+    toast('Payment confirmed! Taking you to your dashboard.', 'success');
+    setReadyPromise(Promise.resolve(fresh));
+    setTransitioning(true);
+  }
+
+  // ── Return trip from PayMongo Checkout ──────────────────────────────────
+  // Paid plans redirect the browser away to PayMongo's hosted Checkout page
+  // at "Finish setup" (see handleFinish below) and PayMongo brings it back
+  // here with ?checkout=success or ?checkout=cancelled (see paymongo.js).
+  useEffect(() => {
+    const checkout = searchParams.get('checkout');
+    if (!checkout || !subscription) return;
+
+    if (checkout === 'success') {
+      confirmPaymentAndFinish(subscription.subscriptionId);
+    } else if (checkout === 'cancelled') {
+      toast('Checkout was cancelled — you can finish setup whenever you\'re ready.', 'info');
+      setSearchParams(prev => {
+        const next = new URLSearchParams(prev);
+        next.delete('checkout');
+        return next;
+      }, { replace: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, subscription?.subscriptionId]);
+
+  // Keep retrying quietly in the background while the "still confirming"
+  // card is up, instead of leaving it to a manual "Check again" click.
+  useEffect(() => {
+    if (paymentCheck !== 'timeout' || !subscription?.subscriptionId) return;
+    const timer = setTimeout(() => {
+      confirmPaymentAndFinish(subscription.subscriptionId);
+    }, AUTO_RETRY_INTERVAL_MS);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paymentCheck, subscription?.subscriptionId]);
 
   // Commit the pending login from registerCompanyAdmin() as soon as we land
   // here. Without this, `user` (and therefore `user.subscriptionId`) stays
@@ -298,14 +417,24 @@ export default function OnboardingPage() {
   }, [commitLogin]);
 
   useEffect(() => {
+    // Without this, a hard page load (PayMongo Checkout does a full browser
+    // redirect back here, not a client-side navigation) sees `user` still
+    // `undefined` while the Supabase session is restoring. SubscriptionContext
+    // has nothing to fetch yet, immediately reports loading=false/subscription=
+    // null, and this effect used to fire right then — sending a perfectly
+    // subscribed admin returning from a successful payment to /pricing before
+    // their session (and therefore their subscription) ever got a chance to
+    // load. Wait for auth to resolve first, same guard PrivateRoute already
+    // uses for /app/*.
+    if (!authReady) return;
     if (!loading && !subscription) navigate('/pricing');
-  }, [subscription, loading, navigate]);
+  }, [subscription, loading, authReady, navigate]);
 
   useEffect(() => {
     if (subscription?.onboardingComplete) navigate('/app/dashboard', { replace: true });
   }, [subscription?.onboardingComplete, navigate]);
 
-  if (loading) return <LoadingScreen label="Setting up your workspace…" />;
+  if (!authReady || loading) return <LoadingScreen label="Setting up your workspace…" />;
   if (!subscription) return null;
 
   const enrolled = subscription.enrolledEmployees || [];
@@ -359,6 +488,30 @@ export default function OnboardingPage() {
   }
 
   async function handleFinish() {
+    // Paid plans: send the browser to PayMongo's hosted Checkout page — that's
+    // the one and only place a card gets entered. Onboarding isn't marked
+    // complete here; it happens on the return trip (?checkout=success, above)
+    // once PayMongo/the webhook have actually confirmed payment.
+    if (!isTrialPlan) {
+      setSaving(true);
+      try {
+        await startCheckout({
+          subscriptionId: subscription.subscriptionId,
+          planId: subscription.planId,
+          planName: currentPlan?.name,
+          amountPhp: (currentPlan?.price || 0) * Math.max(enrolled.length, 1),
+          seats: Math.max(enrolled.length, 1),
+          email: subscription.company?.adminEmail,
+        });
+        // startCheckout() redirects the browser on success — nothing left to do here.
+      } catch (err) {
+        setSaving(false);
+        toast(err.message || 'Could not start checkout. Please try again.', 'error');
+      }
+      return;
+    }
+
+    // Trial plans: nothing to bill, so complete onboarding right away.
     setSaving(true);
     // Confirm the subscription row really exists in Supabase before we ever
     // navigate to the dashboard. Without this, ProtectedRoute's
@@ -382,6 +535,34 @@ export default function OnboardingPage() {
         promise={readyPromise}
         onComplete={() => { commitLogin(); navigate('/app/dashboard'); }}
       />
+    );
+  }
+
+  if (paymentCheck === 'confirming') {
+    return <LoadingScreen label="Confirming your payment…" />;
+  }
+
+  if (paymentCheck === 'timeout') {
+    return (
+      <div className="min-h-screen bg-surface-50 flex items-center justify-center px-4">
+        <div className="card p-6 max-w-sm w-full text-center space-y-3">
+          <div className="w-12 h-12 rounded-2xl bg-warning-50 flex items-center justify-center mx-auto">
+            <AlertCircle size={20} className="text-warning-600" />
+          </div>
+          <p className="text-sm font-semibold text-ink-900">Still confirming your payment</p>
+          <p className="text-sm text-ink-400">
+            Your card was charged, but we're still waiting on PayMongo to confirm it on our end.
+            This is usually quick — you can check again in a moment.
+          </p>
+          <button
+            onClick={() => confirmPaymentAndFinish(subscription.subscriptionId)}
+            disabled={saving}
+            className="btn-primary w-full justify-center"
+          >
+            {saving ? <Spinner size={13} /> : 'Check again'}
+          </button>
+        </div>
+      </div>
     );
   }
 

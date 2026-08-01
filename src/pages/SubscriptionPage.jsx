@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useState, useEffect } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   CreditCard, Users, Zap, Check, AlertTriangle, ArrowUpRight,
   Calendar, X, ChevronRight, Building2, ChevronDown, Star,
@@ -8,6 +8,8 @@ import {
 import { useSubscription, PLANS } from '../context/SubscriptionContext';
 import { useToast } from '../context/ToastContext';
 import { SectionHeader, Modal, ProgressBar } from '../components/ui';
+import { startCheckout } from '../utils/paymongo';
+import { calculateProratedUpgradeAmount } from '../utils/proration';
 
 const PLAN_ORDER = ['free_trial', 'starter', 'growth', 'enterprise'];
 
@@ -35,9 +37,10 @@ const UPGRADE_PERKS = {
 export default function SubscriptionPage() {
   const navigate = useNavigate();
   const toast = useToast();
+  const [searchParams, setSearchParams] = useSearchParams();
   const {
     subscription, currentPlan, seatsUsed, seatsAvailable, trialDaysLeft,
-    upgradePlan, cancelSubscription,
+    upgradePlan, cancelSubscription, reactivateSubscription, refreshSubscription,
   } = useSubscription();
 
   const [changePlanModal, setChangePlanModal] = useState(false);
@@ -45,6 +48,33 @@ export default function SubscriptionPage() {
   const [selectedPlan, setSelectedPlan]       = useState(null);
   const [upgradePreview, setUpgradePreview]   = useState(null); // plan to show benefits for
   const [confirmDowngrade, setConfirmDowngrade] = useState(false);
+  const [renewing, setRenewing] = useState(false);
+  const [changingPlan, setChangingPlan] = useState(false); // true while an upgrade checkout is in flight
+
+  // ── Return trip from PayMongo Checkout (renewal) ────────────────────────
+  // "Renew now" (below) sends the browser away to PayMongo's hosted Checkout
+  // page; PayMongo brings it back here with ?checkout=success|cancelled (see
+  // paymongo.js). paymongo-webhook is what actually flips status back to
+  // "active" and rolls nextBillingDate forward — this effect just reflects
+  // that back to the admin and makes sure we're showing the freshest data,
+  // since the webhook update happens out-of-band from this redirect.
+  useEffect(() => {
+    const checkout = searchParams.get('checkout');
+    if (!checkout) return;
+
+    if (checkout === 'success') {
+      toast('Payment received — your subscription is renewed.', 'success');
+      refreshSubscription();
+    } else if (checkout === 'cancelled') {
+      toast('Checkout was cancelled. You can renew any time from this page.', 'info');
+    }
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev);
+      next.delete('checkout');
+      return next;
+    }, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   if (!subscription) {
     return (
@@ -95,25 +125,119 @@ export default function SubscriptionPage() {
     }
   }
 
-  function applyPlanChange() {
+  async function applyPlanChange() {
     const plan = PLANS.find(p => p.id === selectedPlan);
-    upgradePlan(selectedPlan);
-    toast(`Switched to ${plan?.name} plan!`, 'success');
-    setChangePlanModal(false);
-    setConfirmDowngrade(false);
-    setSelectedPlan(null);
-    setUpgradePreview(null);
+    const targetIdx = PLAN_ORDER.indexOf(selectedPlan);
+
+    // Downgrades (and moving to the already-consumed free trial, which
+    // upgradePlan() itself rejects) apply immediately, same as before — no
+    // charge, no refund for the current cycle's unused higher-tier value.
+    if (targetIdx <= currentIdx) {
+      try {
+        upgradePlan(selectedPlan);
+        toast(`Switched to ${plan?.name} plan!`, 'success');
+      } catch (err) {
+        toast(err.message || 'Could not change plan.', 'error');
+        return;
+      }
+      setChangePlanModal(false);
+      setConfirmDowngrade(false);
+      setSelectedPlan(null);
+      setUpgradePreview(null);
+      return;
+    }
+
+    // Upgrades: charge the prorated difference for the rest of the current
+    // cycle right now via PayMongo, instead of granting the higher tier for
+    // free until nextBillingDate. The plan itself only changes once the
+    // webhook confirms this payment (see paymongo-webhook's `changeType:
+    // "plan_change"` handling) — not optimistically here.
+    const prorated = calculateProratedUpgradeAmount({
+      oldPrice: currentPlan?.price ?? 0,
+      newPrice: plan?.price ?? 0,
+      seats: seatsUsed,
+      nextBillingDate: subscription.billing?.nextBillingDate,
+    });
+
+    if (prorated <= 0) {
+      // Nothing to charge (e.g. same price) — just apply it.
+      try {
+        upgradePlan(selectedPlan);
+        toast(`Switched to ${plan?.name} plan!`, 'success');
+      } catch (err) {
+        toast(err.message || 'Could not change plan.', 'error');
+        return;
+      }
+      setChangePlanModal(false);
+      setSelectedPlan(null);
+      setUpgradePreview(null);
+      return;
+    }
+
+    setChangingPlan(true);
+    try {
+      await startCheckout({
+        subscriptionId: subscription.subscriptionId,
+        planId: selectedPlan,
+        planName: plan?.name,
+        amountPhp: prorated,
+        seats: seatsUsed,
+        email: subscription.company?.adminEmail,
+        changeType: 'plan_change',
+        successUrl: `${window.location.origin}/app/subscription?checkout=success`,
+        cancelUrl: `${window.location.origin}/app/subscription?checkout=cancelled`,
+      });
+      // startCheckout() redirects the browser on success — nothing left to do here.
+    } catch (err) {
+      setChangingPlan(false);
+      toast(err.message || 'Could not start checkout. Please try again.', 'error');
+    }
   }
 
   function handleCancel() {
     cancelSubscription();
-    toast('Subscription cancelled. Access continues until end of billing period.', 'warning');
+    const until = subscription.billing?.nextBillingDate
+      ? new Date(subscription.billing.nextBillingDate).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
+      : 'the end of your current billing period';
+    toast(`Subscription set to cancel. You'll keep full access until ${until}.`, 'warning');
     setCancelModal(false);
+  }
+
+  function handleUndoCancel() {
+    reactivateSubscription();
+    toast('Cancellation undone — your subscription will continue as normal.', 'success');
+  }
+
+  async function handleRenewNow() {
+    if (!currentPlan || currentPlan.price === 0) return; // trial plans have nothing to renew
+    setRenewing(true);
+    try {
+      await startCheckout({
+        subscriptionId: subscription.subscriptionId,
+        planId: subscription.planId,
+        planName: currentPlan.name,
+        amountPhp: seatsUsed * currentPlan.price,
+        seats: seatsUsed,
+        email: subscription.company?.adminEmail,
+      });
+      // startCheckout() redirects the browser on success — nothing left to do here.
+    } catch (err) {
+      setRenewing(false);
+      toast(err.message || 'Could not start checkout. Please try again.', 'error');
+    }
   }
 
   const selectedPlanData  = selectedPlan  ? PLANS.find(p => p.id === selectedPlan)  : null;
   const upgradePlanData   = upgradePreview ? PLANS.find(p => p.id === upgradePreview) : null;
   const isDowngrade       = selectedPlan && PLAN_ORDER.indexOf(selectedPlan) < currentIdx;
+  const proratedPreview   = selectedPlanData && !isDowngrade
+    ? calculateProratedUpgradeAmount({
+        oldPrice: currentPlan?.price ?? 0,
+        newPrice: selectedPlanData.price ?? 0,
+        seats: seatsUsed,
+        nextBillingDate: subscription.billing?.nextBillingDate,
+      })
+    : 0;
 
   return (
     <div className="space-y-5">
@@ -132,6 +256,22 @@ export default function SubscriptionPage() {
           <button onClick={() => setChangePlanModal(true)} className="btn-primary btn-sm shrink-0">
             Activate plan
           </button>
+        </div>
+      )}
+
+      {/* Pending cancellation banner — cancelSubscription() no longer locks
+          anything immediately; this just reflects the intent until the
+          period actually ends (see subscription-lifecycle cron). */}
+      {subscription.cancelAtPeriodEnd && !isCancelled && (
+        <div className="flex items-center gap-3 p-4 rounded-xl bg-warning-50 border border-warning-200">
+          <AlertTriangle size={16} className="text-warning-600 shrink-0" />
+          <div className="flex-1">
+            <p className="text-sm font-semibold text-warning-800">Subscription set to cancel</p>
+            <p className="text-xs text-warning-600 mt-0.5">
+              You'll keep full access until {nextBilling}, then your workspace switches to read-only mode.
+            </p>
+          </div>
+          <button onClick={handleUndoCancel} className="btn-secondary btn-sm shrink-0">Keep subscription</button>
         </div>
       )}
 
@@ -154,11 +294,11 @@ export default function SubscriptionPage() {
           <div className="flex-1">
             <p className="text-sm font-semibold text-warning-800">Payment failed</p>
             <p className="text-xs text-warning-600 mt-0.5">
-              We couldn't process your last payment. Update your billing details to avoid a suspension.
+              We couldn't process your last payment. Pay now to avoid a suspension.
             </p>
           </div>
-          <button onClick={() => setChangePlanModal(true)} className="btn-primary btn-sm shrink-0">
-            Update billing
+          <button onClick={handleRenewNow} disabled={renewing} className="btn-primary btn-sm shrink-0">
+            {renewing ? 'Redirecting…' : 'Pay now'}
           </button>
         </div>
       )}
@@ -174,8 +314,8 @@ export default function SubscriptionPage() {
               Unresolved accounts are permanently deleted 30 days after suspension.
             </p>
           </div>
-          <button onClick={() => setChangePlanModal(true)} className="btn-danger btn-sm shrink-0">
-            Reactivate
+          <button onClick={handleRenewNow} disabled={renewing} className="btn-danger btn-sm shrink-0">
+            {renewing ? 'Redirecting…' : 'Reactivate'}
           </button>
         </div>
       )}
@@ -234,7 +374,14 @@ export default function SubscriptionPage() {
         {/* Billing + workspace */}
         <div className="space-y-4">
           <div className="card p-5">
-            <p className="text-xs font-semibold text-ink-400 uppercase tracking-wide mb-3">Billing</p>
+            <div className="flex items-center justify-between mb-3">
+              <p className="text-xs font-semibold text-ink-400 uppercase tracking-wide">Billing</p>
+              {!isTrial && !isCancelled && (
+                <button onClick={handleRenewNow} disabled={renewing} className="text-xs font-semibold text-brand-600 hover:text-brand-700 disabled:opacity-50">
+                  {renewing ? 'Redirecting…' : 'Renew now'}
+                </button>
+              )}
+            </div>
             <div className="space-y-3">
               <div className="flex justify-between text-xs">
                 <span className="text-ink-500">Monthly estimate</span>
@@ -256,8 +403,8 @@ export default function SubscriptionPage() {
                   <CreditCard size={12} className="text-white" />
                 </div>
                 <div>
-                  <p className="text-xs font-semibold text-ink-800">•••• {subscription.billing?.card4}</p>
-                  <p className="text-[10px] text-ink-400">Expires {subscription.billing?.expiry}</p>
+                  <p className="text-xs font-semibold text-ink-800">Paid via PayMongo Checkout</p>
+                  <p className="text-[10px] text-ink-400">Card, GCash, or Maya — entered securely at each payment</p>
                 </div>
               </div>
             </div>
@@ -277,7 +424,7 @@ export default function SubscriptionPage() {
             <p className="text-[11px] text-ink-400">Admin: {subscription.company.adminName}</p>
           </div>
 
-          {!isCancelled && (
+          {!isCancelled && !subscription.cancelAtPeriodEnd && (
             <button onClick={() => setCancelModal(true)} className="w-full text-xs text-danger-500 hover:text-danger-700 hover:underline text-center py-1">
               Cancel subscription
             </button>
@@ -294,12 +441,16 @@ export default function SubscriptionPage() {
             <button
               className={isDowngrade ? 'btn-danger' : 'btn-primary'}
               onClick={handleConfirmChange}
-              disabled={!selectedPlan || selectedPlan === subscription.planId}
+              disabled={!selectedPlan || selectedPlan === subscription.planId || changingPlan}
             >
-              {!selectedPlan || selectedPlan === subscription.planId
+              {changingPlan
+                ? 'Redirecting to checkout…'
+                : !selectedPlan || selectedPlan === subscription.planId
                 ? 'Select a plan'
                 : isDowngrade
                 ? '⬇ Downgrade plan'
+                : proratedPreview > 0
+                ? `⬆ Upgrade plan — pay ₱${proratedPreview.toFixed(2)} now`
                 : '⬆ Upgrade plan'}
             </button>
           </>
@@ -437,7 +588,10 @@ export default function SubscriptionPage() {
         <div className="space-y-3">
           <div className="p-4 rounded-xl bg-danger-50 border border-danger-100 text-sm text-danger-700">
             <p className="font-semibold mb-1">Are you sure you want to cancel?</p>
-            <p className="text-xs">Your workspace will switch to read-only mode. Employee data is preserved for 90 days.</p>
+            <p className="text-xs">
+              You'll keep full access until the end of your current billing period ({nextBilling}). After that,
+              your workspace switches to read-only mode. Employee data is preserved.
+            </p>
           </div>
           <ul className="text-xs text-ink-500 space-y-1.5">
             <li className="flex items-center gap-2"><X size={11} className="text-danger-400 shrink-0" /> Employees will no longer be able to clock in</li>

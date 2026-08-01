@@ -1,7 +1,9 @@
 // supabase/functions/verify-otp/index.ts
 //
-// Verifies a code sent by send-otp. Marks it used on success so it can't
-// be replayed, and rejects expired/mismatched/already-used codes.
+// Verifies a code sent by send-otp. On success, deletes the row outright
+// (rather than just marking it used) so verified/consumed codes don't pile
+// up in the table indefinitely — it can never be replayed either way since
+// it no longer exists. Still rejects expired/mismatched codes normally.
 //
 // Call from the client:
 //   const { data } = await supabase.functions.invoke('verify-otp', {
@@ -76,7 +78,11 @@ Deno.serve(async (req) => {
     });
   }
 
-  await supabase.from("otp_codes").update({ used_at: new Date().toISOString() }).eq("id", row.id);
+  // Verified — remove the row entirely rather than keeping a "used" record
+  // around forever. The hash is single-purpose and already can't be
+  // replayed once deleted, so there's no value in retaining it, and this
+  // keeps the table from growing unbounded with rows nobody ever reads.
+  await supabase.from("otp_codes").delete().eq("id", row.id);
 
   return new Response(JSON.stringify({ ok: true }), { headers: { "Content-Type": "application/json", ...corsHeaders() } });
 });

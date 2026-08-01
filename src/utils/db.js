@@ -143,30 +143,90 @@ export async function getSubscription(subscriptionId) {
       },
       status:            data.status,
       trialEndsAt:       data.trial_ends_at,
+      paymongoPaymentId: data.paymongo_payment_id ?? null,
       createdAt:         data.created_at,
+      // Defaults to false (never treat a missing/legacy row as already
+      // onboarded) — see subscribe()/completeOnboarding() in
+      // SubscriptionContext for where this actually gets set.
+      onboardingComplete: data.onboarding_complete ?? false,
+      // Same reasoning as onboardingComplete above — see putSubscription's
+      // missing-column fallback for what happens before this migration runs.
+      cancelAtPeriodEnd: data.cancel_at_period_end ?? false,
     };
   }, READ_TTL_MS);
 }
 
+/**
+ * Deletes a subscription row outright — used to roll back a signup that
+ * created the subscription (subscribe()) but then failed a later step
+ * (account creation, billing) before the signup was actually complete.
+ * Without this, a failed/retried signup leaves an orphaned subscription
+ * row behind every attempt (see SignupPage.handleSubmit).
+ *
+ * Deliberately does NOT touch `accounts` — unlike adminDeleteSubscription,
+ * this only ever runs for a subscription that never got a linked account
+ * in the first place (registerCompanyAdmin is what failed).
+ */
+export async function deleteSubscriptionRow(subscriptionId) {
+  const { error } = await withDbTimeout(
+    supabase.from('subscriptions').delete().eq('subscription_id', subscriptionId),
+    'deleteSubscriptionRow',
+  );
+  if (error) {
+    console.error('[deleteSubscriptionRow] failed:', error.message);
+    throw error;
+  }
+  cacheInvalidate(`subscription:${subscriptionId}`);
+  cacheInvalidate('superadmin:subscriptions');
+}
+
 export async function putSubscription(state) {
-  let error;
+  const basePayload = {
+    subscription_id:    state.subscriptionId,
+    plan_id:            state.planId,
+    company:            state.company,
+    billing:            state.billing,
+    enrolled_employees: state.enrolledEmployees ?? [],
+    departments:        state.departments        ?? [],
+    shifts:             state.shifts             ?? [],
+    attendance_records: state.attendanceRecords  ?? [],
+    leave_requests:     state.leaveRequests      ?? [],
+    settings:           { ...(state.settings ?? {}), autoDepartments: state.autoDepartments ?? [] },
+    status:             state.status,
+    trial_ends_at:      state.trialEndsAt        ?? null,
+  };
+  // Was previously never written, so it always fell back to the column's
+  // own default on insert and was never updated by completeOnboarding() —
+  // meaning a reload could never tell an in-progress signup apart from a
+  // finished one. Explicit default to false here matches the safe
+  // assumption in getSubscription().
+  const payloadWithOnboarding = {
+    ...basePayload,
+    onboarding_complete: state.onboardingComplete ?? false,
+    cancel_at_period_end: state.cancelAtPeriodEnd ?? false,
+  };
+
+  let error, missingColumn = false;
   try {
     ({ error } = await withRetryOnTimeout(() => supabase
       .from('subscriptions')
-      .upsert({
-        subscription_id:    state.subscriptionId,
-        plan_id:            state.planId,
-        company:            state.company,
-        billing:            state.billing,
-        enrolled_employees: state.enrolledEmployees ?? [],
-        departments:        state.departments        ?? [],
-        shifts:             state.shifts             ?? [],
-        attendance_records: state.attendanceRecords  ?? [],
-        leave_requests:     state.leaveRequests      ?? [],
-        settings:           { ...(state.settings ?? {}), autoDepartments: state.autoDepartments ?? [] },
-        status:             state.status,
-        trial_ends_at:      state.trialEndsAt        ?? null,
-      }, { onConflict: 'subscription_id' }), 'putSubscription'));
+      .upsert(payloadWithOnboarding, { onConflict: 'subscription_id' }), 'putSubscription'));
+    // PGRST204 = "Could not find the '<col>' column ... in the schema
+    // cache" — thrown when a migration (onboarding_complete or
+    // cancel_at_period_end) hasn't been applied to this Supabase project
+    // yet. Retry without either optional field so writes keep working in
+    // the meantime, rather than hard-failing every save until the
+    // migration runs.
+    missingColumn = error?.code === 'PGRST204' || /onboarding_complete|cancel_at_period_end/i.test(error?.message || '');
+    if (missingColumn) {
+      console.warn(
+        "[putSubscription] 'onboarding_complete' or 'cancel_at_period_end' column not found — run the matching " +
+        'migration in supabase/migrations/ against your Supabase project. Falling back to a write without them for now.'
+      );
+      ({ error } = await withRetryOnTimeout(() => supabase
+        .from('subscriptions')
+        .upsert(basePayload, { onConflict: 'subscription_id' }), 'putSubscription'));
+    }
   } catch (timeoutErr) {
     // A bare timeout/abort Error from withDbTimeout (not a Supabase
     // {error} object) used to skip the check below entirely and propagate

@@ -18,7 +18,7 @@ const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
  * @param {string} [params.email]
  * @returns {Promise<void>} redirects the browser on success; throws on failure
  */
-export async function startCheckout({ subscriptionId, planId, planName, amountPhp, seats, email }) {
+export async function startCheckout({ subscriptionId, planId, planName, amountPhp, seats, email, successUrl, cancelUrl, changeType }) {
   const resp = await fetch(`${supabaseUrl}/functions/v1/create-checkout-session`, {
     method: 'POST',
     headers: {
@@ -32,8 +32,14 @@ export async function startCheckout({ subscriptionId, planId, planName, amountPh
       amountPhp,
       seats,
       email,
-      successUrl: `${window.location.origin}/app/subscription?checkout=success`,
-      cancelUrl: `${window.location.origin}/app/subscription?checkout=cancelled`,
+      changeType,
+      // NOTE: this intentionally points back at /onboard, not /app/subscription.
+      // onboardingComplete is still false at this point (see OnboardingPage/App.jsx
+      // PrivateRoute), so a successUrl under /app/* would just get bounced straight
+      // back to /onboard anyway. Returning to /onboard directly lets it read
+      // ?checkout=success/cancelled itself and finish the flow.
+      successUrl: successUrl ?? `${window.location.origin}/onboard?checkout=success`,
+      cancelUrl: cancelUrl ?? `${window.location.origin}/onboard?checkout=cancelled`,
     }),
   });
 

@@ -76,32 +76,74 @@ function extToContentType(filename: string): string {
   return map[ext] ?? "application/octet-stream";
 }
 
-/** Wraps arbitrary HTML body content in a minimal, branded email shell. */
+/**
+ * Wraps arbitrary HTML body content in a branded email shell.
+ *
+ * Font stack: Open Sans is loaded via a web-font <link> for clients that
+ * support it (Apple Mail, most webmail in an iframe, etc.), with a system
+ * "humanist sans" fallback chain for the many clients (Outlook desktop,
+ * Gmail's own rendering path in some cases) that strip <link>/@import and
+ * fall back to inline font-family — Segoe UI / Helvetica / Arial are the
+ * closest visual match to Open Sans on Windows/macOS respectively, so the
+ * email stays readable either way instead of collapsing to a serif default.
+ */
+const FONT_STACK =
+  "'Open Sans','Segoe UI',Helvetica,Arial,sans-serif";
+
 function renderTemplate(heading: string | undefined, bodyHtml: string): string {
   return `<!DOCTYPE html>
-<html>
-  <body style="margin:0;padding:0;background:#f4f5f7;font-family:Arial,Helvetica,sans-serif;">
-    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f5f7;padding:24px 0;">
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700;800&display=swap" rel="stylesheet" />
+    <!--[if mso]>
+    <style>
+      * { font-family: 'Segoe UI', Arial, sans-serif !important; }
+    </style>
+    <![endif]-->
+  </head>
+  <body style="margin:0;padding:0;background:#eef0f6;font-family:${FONT_STACK};">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#eef0f6;padding:40px 16px;">
       <tr>
         <td align="center">
-          <table role="presentation" width="560" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:8px;overflow:hidden;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(30,41,86,0.08);">
+            <!-- Header -->
             <tr>
-              <td style="background:#4f6ef7;padding:20px 28px;">
-                <span style="color:#ffffff;font-size:18px;font-weight:bold;">ERJ Smart Solutions</span>
+              <td style="background:linear-gradient(135deg,#6366f1,#4f46e5);padding:28px 32px;">
+                <table role="presentation" cellpadding="0" cellspacing="0">
+                  <tr>
+                    <td style="vertical-align:middle;">
+                      <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#ffffff;opacity:0.85;margin-right:8px;"></span>
+                    </td>
+                    <td style="vertical-align:middle;">
+                      <span style="color:#ffffff;font-size:17px;font-weight:700;font-family:${FONT_STACK};letter-spacing:-0.01em;">ERJ Smart Solutions</span>
+                    </td>
+                  </tr>
+                </table>
               </td>
             </tr>
+            <!-- Body -->
             <tr>
-              <td style="padding:28px;color:#1f2430;font-size:14px;line-height:1.6;">
-                ${heading ? `<h2 style="margin:0 0 16px;font-size:20px;color:#1f2430;">${heading}</h2>` : ""}
+              <td style="padding:36px 32px 32px;color:#1e293b;font-size:14px;line-height:1.65;font-family:${FONT_STACK};">
+                ${heading ? `<h1 style="margin:0 0 18px;font-size:21px;font-weight:800;color:#0f172a;font-family:${FONT_STACK};letter-spacing:-0.01em;">${heading}</h1>` : ""}
                 ${bodyHtml}
               </td>
             </tr>
+            <!-- Footer -->
             <tr>
-              <td style="padding:16px 28px;background:#fafafa;color:#9aa0ac;font-size:12px;">
-                This is an automated message from ERJ Smart Solutions. Please do not reply directly to this email.
+              <td style="padding:20px 32px;background:#f8fafc;border-top:1px solid #eef0f6;">
+                <p style="margin:0;color:#94a3b8;font-size:12px;line-height:1.6;font-family:${FONT_STACK};">
+                  This is an automated message from <strong style="color:#64748b;">ERJ Smart Solutions</strong>. Please do not reply directly to this email.
+                </p>
               </td>
             </tr>
           </table>
+          <p style="margin:20px 0 0;color:#a3a9b7;font-size:11px;font-family:${FONT_STACK};">
+            © ${new Date().getFullYear()} ERJ Smart Solutions. All rights reserved.
+          </p>
         </td>
       </tr>
     </table>

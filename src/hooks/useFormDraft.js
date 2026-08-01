@@ -59,6 +59,8 @@ export function useFormDraft(key, data, { ttlMs, isMeaningful, onOpen, onRestore
 
   // Debounced save whenever `data` changes.
   const timerRef = useRef(null);
+  const latestDataRef = useRef(data);
+  latestDataRef.current = data;
   const serialized = JSON.stringify(data);
   useEffect(() => {
     if (isMeaningful && !isMeaningful(data)) return;
@@ -67,6 +69,27 @@ export function useFormDraft(key, data, { ttlMs, isMeaningful, onOpen, onRestore
     return () => clearTimeout(timerRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key, serialized]);
+
+  // Immediate flush right before the tab hides/reloads/closes — otherwise a
+  // reload landing inside the debounce window can lose the last edits.
+  useEffect(() => {
+    function flush() {
+      const d = latestDataRef.current;
+      if (isMeaningfulRef.current && !isMeaningfulRef.current(d)) return;
+      clearTimeout(timerRef.current);
+      saveDraft(key, d);
+    }
+    function onVisibility() { if (document.hidden) flush(); }
+    window.addEventListener('pagehide', flush);
+    window.addEventListener('beforeunload', flush);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('pagehide', flush);
+      window.removeEventListener('beforeunload', flush);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
 
   return { clear: () => clearDraft(key) };
 }
