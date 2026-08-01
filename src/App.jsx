@@ -28,6 +28,7 @@ import LoginPage from './pages/LoginPage';
 
 import DashboardPage from './pages/DashboardPage';
 import AttendancePage from './pages/AttendancePage';
+import TimeRenderPage from './pages/TimeRenderPage';
 import EmployeesPage from './pages/EmployeesPage';
 import LeavePage from './pages/LeavePage';
 import ReportsPage from './pages/ReportsPage';
@@ -296,6 +297,7 @@ function AppRoutes() {
         <Route index element={<Navigate to="/app/dashboard" replace />} />
         <Route path="dashboard"    element={<DashboardPage />} />
         <Route path="attendance"   element={<AttendancePage />} />
+        <Route path="time-render"  element={<TimeRenderPage />} />
         <Route path="leave"        element={<LeavePage />} />
         <Route path="subscription" element={<RoleRoute roles={['admin']}><SubscriptionPage /></RoleRoute>} />
         <Route path="employees"    element={<RoleRoute roles={['admin','hr','manager']}><EmployeesPage /></RoleRoute>} />

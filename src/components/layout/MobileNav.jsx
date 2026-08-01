@@ -1,6 +1,6 @@
 import { NavLink, useNavigate } from 'react-router-dom';
 import {
-  LayoutDashboard, Clock, Users, CalendarDays, BarChart3,
+  LayoutDashboard, Clock, Timer, Users, CalendarDays, BarChart3,
   Settings, FileText, Building2, Package, Lock,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
@@ -9,6 +9,7 @@ import { useSubscription, PLANS } from '../../context/SubscriptionContext';
 const NAV = [
   { to: '/app/dashboard',    icon: LayoutDashboard, label: 'Dashboard',    roles: ['admin','hr','manager','employee'] },
   { to: '/app/attendance',   icon: Clock,           label: 'Attendance',   roles: ['admin','hr','manager','employee'] },
+  { to: '/app/time-render',  icon: Timer,           label: 'Time Render',  roles: ['employee'] },
   { to: '/app/employees',    icon: Users,           label: 'Employees',    roles: ['admin','hr','manager'] },
   { to: '/app/leave',        icon: CalendarDays,    label: 'Leave',        roles: ['admin','hr','manager','employee'] },
   { to: '/app/reports',      icon: BarChart3,       label: 'Reports',      roles: ['admin','hr','manager'],  planFeature: 'reports' },

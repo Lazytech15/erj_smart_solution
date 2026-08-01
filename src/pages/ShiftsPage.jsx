@@ -16,8 +16,12 @@ const SHIFT_COLORS = ['#f59e0b','#4f6ef7','#10b981','#8b5cf6','#ef4444','#ec4899
 const EMPTY_FORM = {
   name: '', start: '08:00', end: '17:00',
   clockInMode: 'remote', qrValidity: 'daily',
-  clockType: 'standard', // 'standard' = 1 clock in/out · 'split' = multiple sessions per day
-  sessions: [],
+  clockType: 'split', // sessions are now the only configuration — a single
+                       // session behaves exactly like the old "Standard"
+                       // (1 clock in + 1 clock out); add more sessions for
+                       // a split shift. Kept as a field for backward
+                       // compatibility with existing saved shifts.
+  sessions: [{ label: '', start: '08:00', end: '17:00' }],
   breaks: [], // breaks within the shift, e.g. { label: 'Lunch', durationMinutes: 60, paid: false } —
               // the employee starts these themselves from the extension whenever suits them; the
               // duration here is only the allotted length, not a fixed time-of-day window. Unpaid
@@ -71,23 +75,21 @@ function buildShiftPayload(form) {
     .filter(b => Number(b.durationMinutes) > 0)
     .map((b, i) => ({ id: b.id ?? `b${i + 1}`, label: b.label?.trim() || `Break ${i + 1}`, durationMinutes: Number(b.durationMinutes), paid: !!b.paid }));
 
-  if ((form.clockType || 'standard') === 'split' && form.sessions?.length) {
-    const sessions = form.sessions.map((s, i) => ({
-      id: s.id ?? `s${i + 1}`,
-      label: s.label?.trim() || `Session ${i + 1}`,
-      start: s.start,
-      end: s.end,
-    }));
-    return {
-      ...form,
-      clockType: 'split',
-      sessions,
-      breaks,
-      start: sessions[0].start,
-      end: sessions[sessions.length - 1].end,
-    };
-  }
-  return { ...form, clockType: 'standard', sessions: [], breaks };
+  const rawSessions = form.sessions?.length ? form.sessions : [{ start: form.start, end: form.end }];
+  const sessions = rawSessions.map((s, i) => ({
+    id: s.id ?? `s${i + 1}`,
+    label: s.label?.trim() || `Session ${i + 1}`,
+    start: s.start,
+    end: s.end,
+  }));
+  return {
+    ...form,
+    clockType: 'split',
+    sessions,
+    breaks,
+    start: sessions[0].start,
+    end: sessions[sessions.length - 1].end,
+  };
 }
 
 // ── Tiny pure-JS QR renderer (no external lib needed) ────────────────────────
@@ -236,18 +238,8 @@ function QRModal({ shift, open, onClose }) {
 // ── Shift Form ────────────────────────────────────────────────────────────────
 function ShiftFormFields({ form, setForm, departments = [], employees = [], allShifts = [], excludeShiftId }) {
   const f = k => v => setForm(p => ({ ...p, [k]: v }));
-  const clockType = form.clockType || 'standard';
-  const sessions  = form.sessions || [];
+  const sessions  = form.sessions?.length ? form.sessions : [{ label: '', start: form.start, end: form.end }];
   const selectedDepts = form.departments || [];
-
-  function setClockType(type) {
-    setForm(p => {
-      if (type === 'split' && (!p.sessions || p.sessions.length < 2)) {
-        return { ...p, clockType: type, sessions: SESSION_TEMPLATES[2].map(s => ({ ...s })) };
-      }
-      return { ...p, clockType: type };
-    });
-  }
 
   function applyTemplate(count) {
     setForm(p => ({ ...p, sessions: SESSION_TEMPLATES[count].map(s => ({ ...s })) }));
@@ -367,59 +359,28 @@ function ShiftFormFields({ form, setForm, departments = [], employees = [], allS
         )}
       </div>
 
-      {/* Clock Type */}
+      {/* Work Hours — one or more sessions per day. A single session (the
+          default) behaves exactly like the old "Standard" clock type: one
+          clock-in and one clock-out. Add sessions for a split shift (e.g.
+          clock out for lunch, back in for the afternoon). */}
       <div>
-        <p className="text-xs font-medium text-ink-600 mb-2">Clock Type</p>
-        <div className="grid grid-cols-2 gap-2">
-          {[
-            { value: 'standard', icon: Clock,  label: 'Standard',    desc: '1 clock in + 1 clock out' },
-            { value: 'split',    icon: Layers, label: 'Split Shift', desc: 'Multiple in/out per day' },
-          ].map(opt => {
-            const Icon = opt.icon;
-            const active = clockType === opt.value;
-            return (
-              <button
-                key={opt.value}
-                type="button"
-                onClick={() => setClockType(opt.value)}
-                className={`flex items-start gap-2.5 p-3 rounded-xl border-2 text-left transition-all ${
-                  active
-                    ? 'border-brand-500 bg-brand-50'
-                    : 'border-surface-200 bg-white hover:border-surface-300'
-                }`}
-              >
-                <Icon size={15} className={active ? 'text-brand-500 mt-0.5' : 'text-ink-300 mt-0.5'} />
-                <div>
-                  <p className={`text-xs font-semibold ${active ? 'text-brand-600' : 'text-ink-700'}`}>{opt.label}</p>
-                  <p className="text-[10px] text-ink-400 mt-0.5">{opt.desc}</p>
-                </div>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      {clockType === 'standard' ? (
-        <div className="grid grid-cols-2 gap-3">
-          <InputField label="Start Time" type="time" value={form.start} onChange={f('start')} />
-          <InputField label="End Time"   type="time" value={form.end}   onChange={f('end')} />
-        </div>
-      ) : (
-        <div>
-          <div className="flex items-center justify-between mb-2">
-            <p className="text-xs font-medium text-ink-600">
-              Sessions <span className="text-ink-300 font-normal">({sessions.length * 2} punches/day)</span>
-            </p>
+        <div className="flex items-center justify-between mb-2">
+          <p className="text-xs font-medium text-ink-600">
+            Work Hours <span className="text-ink-300 font-normal">({sessions.length * 2} punches/day)</span>
+          </p>
+          {sessions.length > 1 && (
             <div className="flex items-center gap-1.5">
               <button type="button" onClick={() => applyTemplate(2)} className="text-[10px] font-medium text-brand-500 hover:underline">2 sessions</button>
               <span className="text-ink-200">·</span>
               <button type="button" onClick={() => applyTemplate(3)} className="text-[10px] font-medium text-brand-500 hover:underline">3 sessions</button>
             </div>
-          </div>
+          )}
+        </div>
 
-          <div className="space-y-2">
-            {sessions.map((s, idx) => (
-              <div key={idx} className="flex items-center gap-1.5 p-2 rounded-lg border border-surface-200 bg-surface-50">
+        <div className="space-y-2">
+          {sessions.map((s, idx) => (
+            <div key={idx} className="flex items-center gap-1.5 p-2 rounded-lg border border-surface-200 bg-surface-50">
+              {sessions.length > 1 && (
                 <input
                   type="text"
                   value={s.label}
@@ -427,27 +388,29 @@ function ShiftFormFields({ form, setForm, departments = [], employees = [], allS
                   placeholder={`Session ${idx + 1}`}
                   className="input !py-1.5 !text-xs flex-1 min-w-0"
                 />
-                <input type="time" value={s.start} onChange={e => updateSession(idx, 'start', e.target.value)} className="input !py-1.5 !text-xs w-[104px] shrink-0" />
-                <span className="text-ink-300 text-xs shrink-0">–</span>
-                <input type="time" value={s.end} onChange={e => updateSession(idx, 'end', e.target.value)} className="input !py-1.5 !text-xs w-[104px] shrink-0" />
-                {sessions.length > 1 && (
-                  <button type="button" onClick={() => removeSession(idx)} className="p-1 rounded-md text-ink-300 hover:text-danger-500 hover:bg-danger-50 transition-colors shrink-0">
-                    <X size={13} />
-                  </button>
-                )}
-              </div>
-            ))}
-          </div>
+              )}
+              <input type="time" value={s.start} onChange={e => updateSession(idx, 'start', e.target.value)} className="input !py-1.5 !text-xs w-[104px] shrink-0" />
+              <span className="text-ink-300 text-xs shrink-0">–</span>
+              <input type="time" value={s.end} onChange={e => updateSession(idx, 'end', e.target.value)} className="input !py-1.5 !text-xs w-[104px] shrink-0" />
+              {sessions.length > 1 && (
+                <button type="button" onClick={() => removeSession(idx)} className="p-1 rounded-md text-ink-300 hover:text-danger-500 hover:bg-danger-50 transition-colors shrink-0">
+                  <X size={13} />
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
 
-          <button type="button" onClick={addSession} className="flex items-center gap-1.5 text-[11px] font-medium text-brand-500 hover:text-brand-600 mt-2">
-            <Plus size={12} /> Add session
-          </button>
+        <button type="button" onClick={addSession} className="flex items-center gap-1.5 text-[11px] font-medium text-brand-500 hover:text-brand-600 mt-2">
+          <Plus size={12} /> Add session
+        </button>
 
+        {sessions.length > 1 && (
           <p className="text-[10px] text-ink-400 mt-2 leading-relaxed">
             Employees clock in and out once per session — e.g. clock out for lunch, then clock back in for the afternoon. Each session is tracked and totalled separately on the Attendance page.
           </p>
-        </div>
-      )}
+        )}
+      </div>
 
       {/* Breaks — employee-triggered, timer-based breaks inside the shift
            (taken from the Shift Clock extension). Each one gets a label
@@ -653,6 +616,17 @@ function ShiftsContent() {
   // instant the first click lands, so it's obvious the click registered and
   // further clicks are ignored until the request actually settles.
   const [isSaving, setIsSaving] = useState(false);
+  // When Add/Edit is submitted with a name that already matches another
+  // shift, saving pauses here so the admin can choose to update that
+  // existing shift instead of silently creating (or renaming into) a
+  // second shift with the same name.
+  const [duplicateConfirm, setDuplicateConfirm] = useState(null); // { mode: 'add'|'edit', existing }
+
+  function findDuplicateShift(name, excludeId) {
+    const norm = name.trim().toLowerCase();
+    if (!norm) return null;
+    return shifts.find(s => s.name.trim().toLowerCase() === norm && String(s.id) !== String(excludeId)) || null;
+  }
 
   function empCount(shiftId) {
     return employees.filter(e => e.shiftId && String(e.shiftId) === String(shiftId)).length;
@@ -667,8 +641,8 @@ function ShiftsContent() {
       end: shift.end,
       clockInMode: shift.clockInMode || 'remote',
       qrValidity: shift.qrValidity || 'daily',
-      clockType: shift.clockType || 'standard',
-      sessions: shift.sessions?.length ? shift.sessions.map(s => ({ ...s })) : [],
+      clockType: 'split',
+      sessions: shift.sessions?.length ? shift.sessions.map(s => ({ ...s })) : [{ label: '', start: shift.start, end: shift.end }],
       breaks: shift.breaks?.length ? shift.breaks.map(b => ({ ...b })) : [],
       departments: shift.departments ? [...shift.departments] : [],
     });
@@ -676,8 +650,16 @@ function ShiftsContent() {
     setDraftRestored(false);
   }
 
-  async function handleAdd() {
+  async function handleAdd(skipDupeCheck = false) {
     if (!form.name.trim() || isSaving) return;
+    if (!skipDupeCheck) {
+      const dup = findDuplicateShift(form.name, null);
+      if (dup) { setDuplicateConfirm({ mode: 'add', existing: dup }); return; }
+    }
+    await commitAdd();
+  }
+
+  async function commitAdd() {
     const payload = buildShiftPayload(form);
     // addShift sets id = Date.now() internally; capture the same timestamp
     const newShiftId = Date.now();
@@ -706,10 +688,19 @@ function ShiftsContent() {
     setForm(EMPTY_FORM);
     setAddModal(false);
     setDraftRestored(false);
+    setDuplicateConfirm(null);
   }
 
-  async function handleEdit() {
+  async function handleEdit(skipDupeCheck = false) {
     if (!form.name.trim() || isSaving) return;
+    if (!skipDupeCheck) {
+      const dup = findDuplicateShift(form.name, editTarget.id);
+      if (dup) { setDuplicateConfirm({ mode: 'edit', existing: dup }); return; }
+    }
+    await commitEdit();
+  }
+
+  async function commitEdit() {
     const payload = buildShiftPayload(form);
     setIsSaving(true);
     try {
@@ -741,6 +732,49 @@ function ShiftsContent() {
     clearFormDraft();
     setEditTarget(null);
     setDraftRestored(false);
+    setDuplicateConfirm(null);
+  }
+
+  // Chosen from the duplicate-name prompt: apply the current form's
+  // settings onto the OTHER shift that already has this name, instead of
+  // creating (Add) or renaming into (Edit) a second shift with the same
+  // name. The shift being added/edited is discarded in favor of the
+  // existing one, now updated with these settings.
+  async function commitReplaceExisting() {
+    const existingId = duplicateConfirm.existing.id;
+    const payload = buildShiftPayload(form);
+    setIsSaving(true);
+    try {
+      await updateShift(existingId, {
+        name: form.name,
+        start: payload.start,
+        end: payload.end,
+        clockInMode: form.clockInMode,
+        qrValidity: form.qrValidity,
+        clockType: payload.clockType,
+        sessions: payload.sessions,
+        breaks: payload.breaks,
+        departments: form.departments || [],
+      });
+    } catch (err) {
+      console.error('[ShiftsPage] updateShift (replace) failed:', err);
+      toast(saveErrorMessage('Could not save your changes — please refresh the page and try again.'), 'error');
+      return;
+    } finally {
+      setIsSaving(false);
+    }
+    if (form.departments?.length) {
+      employees
+        .filter(e => form.departments.includes(e.department))
+        .forEach(e => updateEmployee(e.id, { shiftId: existingId }));
+    }
+    toast(`Shift "${form.name}" updated`, 'success');
+    clearFormDraft();
+    setForm(EMPTY_FORM);
+    setAddModal(false);
+    setEditTarget(null);
+    setDraftRestored(false);
+    setDuplicateConfirm(null);
   }
 
   async function handleRemove(shift) {
