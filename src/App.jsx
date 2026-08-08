@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useLayoutEffect, useState, useRef } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import ConnectionIssueModal from './components/ConnectionIssueModal';
@@ -18,6 +18,19 @@ import {
   shiftDraftPrefix, isShiftFormMeaningful,
   departmentDraftKey, isDepartmentFormMeaningful,
 } from './utils/draftKeys';
+import { saveLastRoute, getLastRoute } from './utils/lastRoute';
+
+// Captured once, synchronously, the instant this module loads — i.e. before
+// React has rendered a single component, let alone run any effects. This is
+// deliberate: LastRouteTracker's effect saves the *current* location to
+// localStorage on every render, including the very first one. If the app
+// happens to boot on /app/dashboard, Tracker's effect fires and overwrites
+// the saved value with "/app/dashboard" before LastRouteRestore's effect
+// even runs — so if Restore read localStorage itself at that point, it'd
+// only ever see the value Tracker just clobbered it with, and never detect
+// a mismatch. Reading it here, at import time, captures the real
+// pre-overwrite value once and for all.
+const INITIAL_LAST_ROUTE = getLastRoute();
 
 import LandingPage from './pages/public/LandingPage';
 import PricingPage from './pages/public/PricingPage';
@@ -53,7 +66,7 @@ function PrivateRoute({ children }) {
 
   // Wait for the Supabase Auth session to be resolved before making a decision
   if (!authReady) return <LoadingScreen />;
-  if (!user) return <Navigate to="/login" replace />;
+  if (!user) return <Navigate to="/login" state={{ from: location }} replace />;
   if (loading) return <LoadingScreen />;
   if (!subscription) return <Navigate to="/pricing" replace />;
 
@@ -280,6 +293,121 @@ function DraftResumeRedirect() {
   return null;
 }
 
+/**
+ * Keeps sessionStorage updated with whichever /app/* tab the user is
+ * currently on, so LastRouteRestore (below) has somewhere to send them
+ * back to. Runs on every navigation inside the authenticated app —
+ * intentionally including /app/dashboard itself, so a *genuine* visit to
+ * the dashboard is remembered as such and won't get overridden later.
+ */
+function LastRouteTracker() {
+  const location = useLocation();
+
+  useEffect(() => {
+    if (!location.pathname.startsWith('/app/')) return; // ignore /app exact, /login, marketing, etc.
+    saveLastRoute(location.pathname + location.search);
+  }, [location.pathname, location.search]);
+
+  return null;
+}
+
+/**
+ * Counterpart to LastRouteTracker: the moment the app settles on
+ * /app/dashboard, checks whether that's actually where the user meant to
+ * be or just where a fresh boot / forced reload defaulted them. If a
+ * different tab was saved, sends them back to it instead.
+ *
+ * Guarded to run at most once per app boot (checkedRef) — same reasoning
+ * as DraftResumeRedirect: after this first settled check it gets out of
+ * the way completely, so it never fights a later, deliberate click on
+ * "Dashboard" in the sidebar.
+ *
+ * The correction itself is covered by a brief fade overlay (see
+ * `correcting`/`fadingOut` below) instead of firing bare: without it the
+ * user sees a real, painted frame of the Dashboard before getting yanked
+ * over to their actual tab — a jarring flash-then-jump. useLayoutEffect
+ * (rather than useEffect) is what makes the cover-up possible at all: it
+ * commits before the browser paints, so the overlay is already up for the
+ * very first frame instead of appearing a beat after Dashboard was
+ * already visible.
+ */
+function LastRouteRestore() {
+  const { user, authReady } = useAuth();
+  const { subscription, loading } = useSubscription();
+  const location = useLocation();
+  const navigate = useNavigate();
+  const checkedRef = useRef(false);
+  const targetRef = useRef(null);
+  const [correcting, setCorrecting] = useState(false);
+  const [fadingOut, setFadingOut] = useState(false);
+
+  useLayoutEffect(() => {
+    if (checkedRef.current) return;
+    if (!authReady || !user || loading || !subscription) return;
+
+    // Wait until the router has actually settled on a genuine /app/*
+    // subpage — not "/", the bare "/app" index, "/login", "/onboard", etc.
+    // mid-redirect. Boot regularly passes through one of those for a tick
+    // or two (e.g. the index route's <Navigate to="/app/dashboard">, or
+    // PrivateRoute's own onboarding/subscription redirects) on its way to
+    // wherever it's actually going. If auth+subscription happen to resolve
+    // during that transient tick, checking right then burns the one-time
+    // decision on a path that was never the real destination — so by the
+    // time the router actually reaches /app/dashboard a moment later, this
+    // effect is already "checked" and silently never fires the correction.
+    if (!location.pathname.startsWith('/app/')) return;
+
+    // Mark as checked the moment we're able to decide at all — this must
+    // run at most once per app boot no matter the outcome. Previously this
+    // was only set inside the dashboard branch below, which meant landing
+    // anywhere else first left the check still "pending" and able to fire
+    // later — including hijacking a later, deliberate click on Dashboard.
+    checkedRef.current = true;
+
+    if (location.pathname !== '/app/dashboard') return; // nothing to correct
+
+    const saved = INITIAL_LAST_ROUTE;
+    if (saved && saved !== '/app/dashboard' && saved.startsWith('/app/')) {
+      targetRef.current = saved;
+      setCorrecting(true); // cover the swap before it commits
+      navigate(saved, { replace: true });
+    }
+  }, [authReady, user, loading, subscription, location.pathname, navigate]);
+
+  // Once the router has actually landed on the restored tab, hold the
+  // cover for one more beat (so the destination page has a moment to
+  // paint underneath) and then fade it out — a hard cut here would just
+  // trade "flash of Dashboard" for "flash of an empty/half-drawn page".
+  useEffect(() => {
+    if (!correcting || fadingOut) return;
+    if (location.pathname !== targetRef.current) return;
+    const id = setTimeout(() => setFadingOut(true), 150);
+    return () => clearTimeout(id);
+  }, [correcting, fadingOut, location.pathname]);
+
+  useEffect(() => {
+    if (!fadingOut) return;
+    const id = setTimeout(() => setCorrecting(false), 260);
+    return () => clearTimeout(id);
+  }, [fadingOut]);
+
+  if (!correcting) return null;
+
+  // Deliberately NOT reusing <LoadingScreen/> here: that component runs its
+  // own multi-second RAF-driven progress simulation ("Initializing...",
+  // "Loading modules...", a percentage counting up) that assumes it owns
+  // its own lifetime and gets to finish. This cover only lives for a couple
+  // hundred milliseconds, so mounting LoadingScreen just froze its counter
+  // at whatever small percentage it happened to reach (2%, 8%, 11%...) and
+  // then yanked it away mid-animation — exactly the "glitching" look. A
+  // plain indeterminate spinner has no finish line to get cut off before.
+  return (
+    <div className={`erj-route-correct${fadingOut ? ' erj-route-correct--out' : ''}`}>
+      <div className="erj-route-correct__spinner" aria-hidden="true" />
+    </div>
+  );
+}
+
 function AppRoutes() {
   return (
     <Routes>
@@ -329,6 +457,8 @@ export default function App() {
             <FirstLoadGate>
               <AppRoutes />
             </FirstLoadGate>
+            <LastRouteTracker />
+            <LastRouteRestore />
             <DraftResumeRedirect />
             <ConnectionIssueModal />
             <CookieConsentBanner />

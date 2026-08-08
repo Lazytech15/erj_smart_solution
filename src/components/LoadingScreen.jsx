@@ -12,6 +12,7 @@ const styles = {
     zIndex: 9999,
     fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
     padding: "0 24px",
+    animation: "ls-fadein 0.18s ease",
   },
   logoWrap: {
     display: "flex",
@@ -124,6 +125,10 @@ const styles = {
 };
 
 const keyframes = `
+  @keyframes ls-fadein {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+  }
   @keyframes logoBreath {
     0%, 100% { opacity: 1; transform: scale(1); }
     50%       { opacity: 0.88; transform: scale(0.97); }

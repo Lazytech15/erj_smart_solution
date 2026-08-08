@@ -96,7 +96,7 @@ export function isShiftFormMeaningful(draft, original) {
       f.name?.trim() || (f.departments || []).length > 0 || (f.breaks || []).length > 0
     );
   }
-  return ['name', 'start', 'end', 'clockType', 'color']
+  return ['name', 'start', 'end', 'clockType']
     .some(k => String(f[k] ?? '').trim() !== String(original[k] ?? '').trim());
 }
 

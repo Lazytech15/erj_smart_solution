@@ -46,14 +46,46 @@ function getBreakPunches(record) {
 // marker (work vs. paid break vs. unpaid break vs. over-break) instead of
 // relying on text color alone to say what kind of row it is.
 function getTimeLogRows(record) {
-  const work = getSessionPunches(record).map(p => ({ type: 'work', label: p.label, start: p.clockIn, end: p.clockOut }));
+  // Number repeat stretches within the same session ("Morning (2)") the
+  // same way the Edit Attendance Record form already does (see
+  // deriveFormSessions above) — otherwise a break that splits one real
+  // session into two work stretches shows the identical label twice in a
+  // row with nothing to tell them apart.
+  const rawPunches = getSessionPunches(record);
+  const countBySession = new Map();
+  rawPunches.forEach(p => countBySession.set(p.sessionId, (countBySession.get(p.sessionId) || 0) + 1));
+  const seenBySession = new Map();
+  const work = rawPunches.map(p => {
+    const total = countBySession.get(p.sessionId) || 1;
+    const seen = (seenBySession.get(p.sessionId) || 0) + 1;
+    seenBySession.set(p.sessionId, seen);
+    const label = total > 1 && p.label ? `${p.label} (${seen})` : p.label;
+    return { type: 'work', label, start: p.clockIn, end: p.clockOut };
+  });
   const breaks = getBreakPunches(record).map(b => ({ type: 'break', ...b }));
   const toMin = (t) => {
     if (!t) return Infinity; // no start time yet (shouldn't happen) sorts last
     const [h, m] = t.split(':').map(Number);
     return h * 60 + m;
   };
-  return [...work, ...breaks].sort((a, b) => toMin(a.start) - toMin(b.start));
+  // Drop zero-duration work stretches (start === end, e.g. an older
+  // record saved before handleResumeWork auto-corrected the session on a
+  // break that spans a session boundary). A 0-minute "Morning Regular (2)"
+  // row carries no information and just duplicates the session label
+  // that already appears right before the break — so it's noise, not
+  // data, and gets folded out here rather than fixed one record at a time.
+  const nonZeroWork = work.filter(w => !(w.start && w.end && w.start === w.end));
+  const rows = [...nonZeroWork, ...breaks].sort((a, b) => toMin(a.start) - toMin(b.start));
+  // Re-collapse the "(N)" suffix if dropping a zero-duration stretch left
+  // only one real stretch for a session (e.g. "Morning Regular (1)" with
+  // no more "Morning Regular (2)" to distinguish it from).
+  const remainingBySession = new Map();
+  rows.forEach(r => { if (r.type === 'work') remainingBySession.set(r.label?.replace(/\s*\(\d+\)$/, ''), (remainingBySession.get(r.label?.replace(/\s*\(\d+\)$/, '')) || 0) + 1); });
+  return rows.map(r => {
+    if (r.type !== 'work') return r;
+    const base = r.label?.replace(/\s*\(\d+\)$/, '');
+    return remainingBySession.get(base) === 1 ? { ...r, label: base } : r;
+  });
 }
 
 function exportToCSV(records, date, lateThreshold) {

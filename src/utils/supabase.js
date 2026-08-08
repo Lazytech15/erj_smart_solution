@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
+import { isSessionPolicyExpired, isInactivityExpired, getSessionPolicy } from './sessionPolicy';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
@@ -15,6 +16,52 @@ const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 // fails fast (rejects) instead of hanging forever. Exported so other Supabase
 // clients in the app (e.g. the no-session client in db.js) share it.
 export const FETCH_TIMEOUT_MS = 15_000;
+
+// ── Pre-request session-policy check ─────────────────────────────────────
+// The 30s poll in AuthContext (isSessionPolicyExpired / isInactivityExpired)
+// is what force-logs-out a session that's just sitting open, but it's still
+// a poll: it only catches an expired session the next time its interval
+// happens to run — up to 30s late in the best case, and much later than
+// that if the tab was backgrounded (setInterval gets throttled there, same
+// caveat as everywhere else in this file). In that gap, a request the user
+// fires (clicking Save, a background poller, etc.) would go out — and be
+// answered — on a session this app itself already knows should be dead, no
+// forced-logout notice in sight.
+// Fix: check the SAME policy right here, the one true chokepoint every
+// Supabase request (auth or data) already funnels through via
+// `global.fetch`, so an expired session is caught immediately, on the very
+// next request, not up to 30s (or a full backgrounded-tab throttle window)
+// later. Only applies to 'data' calls — see requestKindFromUrl below — so
+// it never blocks the auth calls that are themselves part of logging out
+// (signOut) or logging back in (signInWithPassword, getSession, refresh),
+// none of which should be second-guessed by a policy that either doesn't
+// exist yet (no session) or is about to be cleared anyway.
+export const SESSION_POLICY_EXPIRED_EVENT = 'supabase:session-policy-expired';
+
+let lastPolicyExpiredDispatchAt = 0;
+const POLICY_EXPIRED_DISPATCH_THROTTLE_MS = 5_000; // avoid spamming one event per queued/parallel request
+
+function rejectIfSessionPolicyExpired() {
+  // No policy on record at all (logged out, or a request fired before
+  // login ever ran) — nothing to enforce here; let it through normally.
+  if (!getSessionPolicy()) return null;
+
+  const expiredReason = isSessionPolicyExpired()
+    ? 'session_expired'
+    : isInactivityExpired()
+    ? 'inactivity'
+    : null;
+  if (!expiredReason) return null;
+
+  if (typeof window !== 'undefined') {
+    const now = Date.now();
+    if (now - lastPolicyExpiredDispatchAt > POLICY_EXPIRED_DISPATCH_THROTTLE_MS) {
+      lastPolicyExpiredDispatchAt = now;
+      window.dispatchEvent(new CustomEvent(SESSION_POLICY_EXPIRED_EVENT, { detail: { reason: expiredReason } }));
+    }
+  }
+  return expiredReason;
+}
 
 function anySignal(signals) {
   const controller = new AbortController();
@@ -218,6 +265,19 @@ function releaseSlot() {
 
 export function fetchWithTimeout(url, options = {}) {
   const kind = requestKindFromUrl(url);
+
+  // Fail fast instead of queuing/dispatching a request on a session this
+  // app already knows is expired by policy — see rejectIfSessionPolicyExpired
+  // above. Auth calls are exempt: they're either how logout actually
+  // happens (signOut) or a fresh login (which starts a brand new policy),
+  // and blocking them here would make both impossible.
+  if (kind !== 'auth') {
+    const expiredReason = rejectIfSessionPolicyExpired();
+    if (expiredReason) {
+      return Promise.reject(new Error(`Session ${expiredReason === 'inactivity' ? 'expired from inactivity' : 'expired'} — request blocked.`));
+    }
+  }
+
   console.debug(`[fetch] queuing (${kind}):`, typeof url === 'string' ? url : url?.toString?.());
   return acquireSlot().then(() => {
     console.debug(`[fetch] slot granted, dispatching (${kind}):`, typeof url === 'string' ? url : url?.toString?.());

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { Eye, EyeOff, ArrowRight, Clock, FileText, Users, Shield, ShieldCheck, AlertTriangle, CheckCircle, LogOut } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { useToast } from '../context/ToastContext';
@@ -49,6 +49,14 @@ export default function LoginPage() {
   const { login, verifyMfaAndLogin, commitLogin } = useAuth();
   const toast   = useToast();
   const navigate = useNavigate();
+  const location = useLocation();
+  // Where PrivateRoute bounced them from before sending them to /login (e.g.
+  // a reload that had to re-authenticate mid-session). Falls back to the
+  // dashboard when there's nowhere specific to return to (a normal fresh
+  // login from the login page itself).
+  const from = location.state?.from?.pathname
+    ? location.state.from.pathname + (location.state.from.search || '')
+    : null;
 
   // Prefills from the "remember my email" cookie set after a previous
   // successful sign-in — only present at all if the person accepted the
@@ -183,7 +191,11 @@ export default function LoginPage() {
             toast(`Security notice: ${describeFlagCode(code)}`, 'warning');
           });
 
-          navigate(['superadmin', 'sub_superadmin'].includes(loggedInRoleRef.current) ? '/superadmin' : '/app/dashboard');
+          const isSuperAdmin = ['superadmin', 'sub_superadmin'].includes(loggedInRoleRef.current);
+          // Only honor `from` for regular app routes — a superadmin login
+          // should never be sent back into a tenant's /app/* page, and if
+          // there's nothing to return to, fall back to dashboard as before.
+          navigate(isSuperAdmin ? '/superadmin' : (from && from.startsWith('/app') ? from : '/app/dashboard'));
         }}
       />
     );

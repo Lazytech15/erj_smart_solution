@@ -53,6 +53,48 @@ const SESSION_TEMPLATES = {
   ],
 };
 
+// Quick-fill templates for the three clock-in setups used across the
+// company, so a plain shift starts from a sane, correctly-configured
+// preset instead of admins hand-assembling hours/breaks/clock-in mode
+// from scratch each time (which is how "Morning Shift" ended up
+// misconfigured in the first place). Each preset is a single-session
+// (non-split) shift — picking one sets sessions back to one blank-label
+// session at the preset's hours, so it can't accidentally carry over a
+// split-shift setup from whatever the form had before.
+const CLOCK_TYPE_TEMPLATES = {
+  onsite: {
+    label: 'Onsite',
+    icon: QrCode,
+    desc: 'QR scan at office/site · fixed hours',
+    suggestedName: 'Onsite Shift',
+    start: '08:00', end: '17:00',
+    clockInMode: 'onsite', qrValidity: 'daily',
+    breaks: [
+      { label: 'Lunch', durationMinutes: 60, paid: false },
+    ],
+  },
+  remote: {
+    label: 'Remote',
+    icon: MapPin,
+    desc: 'GPS capture · work-from-anywhere',
+    suggestedName: 'Remote Shift',
+    start: '08:00', end: '17:00',
+    clockInMode: 'remote', qrValidity: 'daily',
+    breaks: [
+      { label: 'Lunch', durationMinutes: 60, paid: false },
+    ],
+  },
+  office: {
+    label: 'Office',
+    icon: Users,
+    desc: 'QR scan at office · standard breaks',
+    suggestedName: 'Office Shift',
+    start: '08:00', end: '17:00',
+    clockInMode: 'onsite', qrValidity: 'daily',
+    breaks: BREAK_TEMPLATE.map(b => ({ ...b })),
+  },
+};
+
 /** Turn the form's raw sessions into a saved shift payload: assigns stable
  *  ids and keeps top-level start/end in sync with the first/last session so
  *  every other part of the app (QR payload, shift chips, status calc) that
@@ -75,20 +117,34 @@ function buildShiftPayload(form) {
     .filter(b => Number(b.durationMinutes) > 0)
     .map((b, i) => ({ id: b.id ?? `b${i + 1}`, label: b.label?.trim() || `Break ${i + 1}`, durationMinutes: Number(b.durationMinutes), paid: !!b.paid }));
 
-  const rawSessions = form.sessions?.length ? form.sessions : [{ start: form.start, end: form.end }];
-  const sessions = rawSessions.map((s, i) => ({
-    id: s.id ?? `s${i + 1}`,
-    label: s.label?.trim() || `Session ${i + 1}`,
-    start: s.start,
-    end: s.end,
-  }));
+  // A plain shift (admin never clicked "Add session") has no form.sessions
+  // at all — this used to still wrap it in a fabricated single-item
+  // sessions array and force clockType: 'split' regardless, which meant
+  // EVERY shift, split or not, got tagged with an auto-generated
+  // "Session 1" id/label. That label then followed every synced punch
+  // into Attendance's Time Log, so a perfectly ordinary shift showed
+  // "Session 1:" in front of every work stretch — confusing on its own,
+  // and actively misleading once a break split one session into two
+  // stretches that both said "Session 1" with nothing to tell them apart.
+  // Only shifts the admin actually built with 2+ sessions are split;
+  // everything else stays a plain shift with no sessions array, same as
+  // getShiftSessions()'s own `{ id: 'full', label: '' }` fallback expects.
+  const isSplit = (form.sessions?.length || 0) > 1;
+  const sessions = isSplit
+    ? form.sessions.map((s, i) => ({
+        id: s.id ?? `s${i + 1}`,
+        label: s.label?.trim() || `Session ${i + 1}`,
+        start: s.start,
+        end: s.end,
+      }))
+    : null;
   return {
     ...form,
-    clockType: 'split',
+    clockType: isSplit ? 'split' : 'standard',
     sessions,
     breaks,
-    start: sessions[0].start,
-    end: sessions[sessions.length - 1].end,
+    start: isSplit ? sessions[0].start : form.start,
+    end: isSplit ? sessions[sessions.length - 1].end : form.end,
   };
 }
 
@@ -312,8 +368,48 @@ function ShiftFormFields({ form, setForm, departments = [], employees = [], allS
     .map(dept => ({ dept, owner: allShifts.find(s => s.id !== excludeShiftId && s.departments?.includes(dept)) }))
     .filter(c => c.owner);
 
+  function applyClockTypeTemplate(key) {
+    const t = CLOCK_TYPE_TEMPLATES[key];
+    if (!t) return;
+    setForm(p => ({
+      ...p,
+      name: p.name.trim() ? p.name : t.suggestedName,
+      start: t.start,
+      end: t.end,
+      clockInMode: t.clockInMode,
+      qrValidity: t.qrValidity,
+      sessions: [{ label: '', start: t.start, end: t.end }],
+      breaks: t.breaks.map(b => ({ ...b })),
+    }));
+  }
+
   return (
     <div className="space-y-4">
+      {/* Clock Type templates */}
+      <div>
+        <p className="text-xs font-medium text-ink-600 mb-2">Clock Type (quick setup)</p>
+        <div className="grid grid-cols-3 gap-2">
+          {Object.entries(CLOCK_TYPE_TEMPLATES).map(([key, t]) => {
+            const Icon = t.icon;
+            return (
+              <button
+                key={key}
+                type="button"
+                onClick={() => applyClockTypeTemplate(key)}
+                className="flex flex-col items-start gap-1.5 p-2.5 rounded-xl border-2 border-surface-200 bg-white hover:border-brand-300 hover:bg-brand-50/40 text-left transition-all"
+              >
+                <Icon size={15} className="text-ink-400" />
+                <p className="text-xs font-semibold text-ink-700">{t.label}</p>
+                <p className="text-[10px] text-ink-400 leading-tight">{t.desc}</p>
+              </button>
+            );
+          })}
+        </div>
+        <p className="text-[10px] text-ink-400 mt-1.5">
+          Fills in hours, breaks, and clock-in mode for that type of work — everything below is still yours to adjust.
+        </p>
+      </div>
+
       <InputField label="Shift Name" value={form.name} onChange={f('name')} placeholder="e.g. Morning Shift" />
 
       {/* Department auto-assign */}
@@ -641,7 +737,7 @@ function ShiftsContent() {
       end: shift.end,
       clockInMode: shift.clockInMode || 'remote',
       qrValidity: shift.qrValidity || 'daily',
-      clockType: 'split',
+      clockType: shift.clockType || 'standard',
       sessions: shift.sessions?.length ? shift.sessions.map(s => ({ ...s })) : [{ label: '', start: shift.start, end: shift.end }],
       breaks: shift.breaks?.length ? shift.breaks.map(b => ({ ...b })) : [],
       departments: shift.departments ? [...shift.departments] : [],

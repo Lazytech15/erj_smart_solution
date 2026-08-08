@@ -8,12 +8,20 @@
 //       - session is force-expired at the next local 00:00:00 (midnight)
 //       - session is also force-expired after 30 minutes of no user activity
 //   • "Remember me (24 hours)":
-//       - session is force-expired 24 hours after login
+//       - session is force-expired 24 hours after login, OR at the next
+//         local 00:00:00, whichever comes first (see startSessionPolicy)
 //       - NOT subject to the 30-minute inactivity timeout
 //
 // Persisted in localStorage (not sessionStorage) so it survives the browser
 // being closed and reopened — that's the whole point: closing the tab
 // should not itself extend or reset the clock.
+//
+// Extra protection: even a "remember me" session is ALSO capped at the next
+// local midnight, on top of its 24h window — whichever comes first. Without
+// this, someone who checks "remember me" at, say, 10pm would stay logged in
+// past midnight (up to 24h from login), which defeats the "force everyone
+// to re-authenticate at day boundary" intent of the midnight rule for
+// everyone else. See startSessionPolicy below for the actual min() logic.
 
 const STORAGE_KEY = 'erj_session_policy';
 
@@ -38,10 +46,15 @@ function nextMidnight(from = new Date()) {
 /** Call once, right after a successful login, to start a new policy window. */
 export function startSessionPolicy(rememberMe) {
   const now = Date.now();
+  // "Remember me" still doesn't outlive the next midnight — take whichever
+  // deadline is sooner. On most days that's the 24h window; only logging in
+  // late at night (less than 24h before midnight) makes midnight the binding
+  // constraint, which is exactly the case this extra protection targets.
+  const midnight = nextMidnight(now);
   const policy = {
     rememberMe: !!rememberMe,
     loginAt: now,
-    expiresAt: rememberMe ? now + REMEMBER_ME_DURATION_MS : nextMidnight(now),
+    expiresAt: rememberMe ? Math.min(now + REMEMBER_ME_DURATION_MS, midnight) : midnight,
     // Timestamp-based idle tracking (see touchActivity/isInactivityExpired
     // below) instead of a single long-lived setTimeout — see comment there
     // for why.

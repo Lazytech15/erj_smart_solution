@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
-import { supabase, withAuthTimeout, SESSION_UNVERIFIABLE_EVENT, forceResetStuckAuthState, SUPABASE_CLIENT_RECREATED_EVENT } from '../utils/supabase';
+import { supabase, withAuthTimeout, SESSION_UNVERIFIABLE_EVENT, SESSION_POLICY_EXPIRED_EVENT, forceResetStuckAuthState, SUPABASE_CLIENT_RECREATED_EVENT } from '../utils/supabase';
 import { cacheClear, cacheForceClearInFlight } from '../utils/cache';
 import {
   evaluateABACPolicy,
@@ -16,6 +16,7 @@ import {
   touchActivity,
   setLogoutReason,
 } from '../utils/sessionPolicy';
+import { clearLastRoute } from '../utils/lastRoute';
 
 // How often to poll for a lapsed session policy while the app is sitting
 // open (e.g. left on the dashboard overnight — this is what force-logs-out
@@ -176,17 +177,31 @@ export function AuthProvider({ children }) {
           setUser(null);
           setAuthReady(true);
         } else if (event === 'TOKEN_REFRESHED') {
-          // Silently refresh the user object when the JWT is renewed
-          const profile = await fetchProfile(session.user.id);
-          setUser(buildUser(session.user, profile));
+          // Silently refresh the user object when the JWT is renewed. If the
+          // profile fetch itself fails (fetchProfile now throws instead of
+          // masking the error — see above), don't let that turn into an
+          // unhandled rejection or wipe out a perfectly good existing user;
+          // just skip this refresh and let the next one try again.
+          try {
+            const profile = await fetchProfile(session.user.id);
+            setUser(buildUser(session.user, profile));
+          } catch (err) {
+            console.warn('[Auth] profile refresh on TOKEN_REFRESHED failed, keeping existing user:', err?.message || err);
+          }
         } else if (event === 'SIGNED_IN') {
           // Only auto-set user from onAuthStateChange on SIGNED_IN if no
           // pending login() flow is in progress (i.e. not going through the
           // ABAC + TransitionLoadingScreen path).
           if (!pendingUserRef.current) {
-            const profile = await fetchProfile(session.user.id);
-            setUser(buildUser(session.user, profile));
-            setAuthReady(true);
+            try {
+              const profile = await fetchProfile(session.user.id);
+              setUser(buildUser(session.user, profile));
+            } catch (err) {
+              console.warn('[Auth] profile fetch on SIGNED_IN failed, treating as logged out:', err?.message || err);
+              setUser(null);
+            } finally {
+              setAuthReady(true);
+            }
           }
         }
       }));
@@ -203,12 +218,38 @@ export function AuthProvider({ children }) {
   }, []);
 
   // ── Profile helper ──────────────────────────────────────────────────────────
-  async function fetchProfile(authUid) {
-    const { data } = await supabase
+  async function fetchProfile(authUid, { retried = false } = {}) {
+    const { data, error } = await supabase
       .from('accounts')
       .select('role, name, employee_id, subscription_id, permissions, avatar_url, two_factor_enabled')
       .eq('auth_uid', authUid)
       .maybeSingle();
+    // Previously only `data` was read here, so a failed/flaky request (e.g.
+    // the exact kind of post-backgrounding connection hiccup documented
+    // elsewhere in this file) silently looked identical to "this user
+    // genuinely has no profile row yet". buildUser() then defaulted
+    // role: profile?.role ?? 'employee' — quietly demoting an admin to
+    // 'employee' for that render, which is exactly why RoleRoute-protected
+    // pages (Departments, Settings, etc.) would bounce back to /app/dashboard
+    // right after a tab resume, no matter what the URL/last-route said.
+    // Surface the error instead so the caller can fail safe (treat it as
+    // "couldn't verify", not "verified: no admin access") rather than
+    // building a user object with a wrong role.
+    if (error) throw error;
+
+    // A logged-in user's profile row is created at signup and never
+    // deleted while the account exists — so a genuinely empty result here
+    // (no error, just zero rows) almost always means the request went out
+    // before the just-restored/just-refreshed session was fully attached
+    // to the client (a known Supabase timing gap right after resuming from
+    // background), not that the profile actually vanished. Retry once,
+    // briefly, before accepting "no profile" and letting the caller build
+    // a user object with a defaulted (wrong) role from it.
+    if (!data && !retried) {
+      await new Promise(resolve => setTimeout(resolve, 400));
+      return fetchProfile(authUid, { retried: true });
+    }
+
     return data ?? null;
   }
 
@@ -537,6 +578,7 @@ export function AuthProvider({ children }) {
     } finally {
       clearSessionPolicy();
       cacheClear();
+      clearLastRoute();
 
       // A logout triggered by 'session_unverifiable' means checkSessionOnResume
       // already gave up waiting on the auth lock/fetch layer — i.e. we KNOW
@@ -586,6 +628,25 @@ export function AuthProvider({ children }) {
     window.addEventListener(SESSION_UNVERIFIABLE_EVENT, handleUnverifiable);
     return () => window.removeEventListener(SESSION_UNVERIFIABLE_EVENT, handleUnverifiable);
   }, [user]);
+
+  // ── React to a request-time policy check catching an expired session ───────
+  // Belt-and-suspenders alongside the 30s poll below: fetchWithTimeout (see
+  // utils/supabase.js) now checks the SAME session policy immediately before
+  // dispatching any data request, so an expired-by-policy session gets
+  // caught (and this event fires) on the very next request instead of
+  // waiting out the rest of the poll interval — this is what actually fixes
+  // "idle timeout expired but nothing forced a logout until later." Force a
+  // real logout (clears local session, records the reason for LoginPage)
+  // the same way the poll itself does, rather than just leaving the
+  // rejected request to fail silently in whatever caller fired it.
+  useEffect(() => {
+    function handlePolicyExpired(event) {
+      if (!user) return;
+      logout(event?.detail?.reason || 'session_expired');
+    }
+    window.addEventListener(SESSION_POLICY_EXPIRED_EVENT, handlePolicyExpired);
+    return () => window.removeEventListener(SESSION_POLICY_EXPIRED_EVENT, handlePolicyExpired);
+  }, [user, logout]);
 
   // ── Session policy enforcement while the app stays open ────────────────────
   // Both checks below run off the SAME 30s poll, driven by real wall-clock

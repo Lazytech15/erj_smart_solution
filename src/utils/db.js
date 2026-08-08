@@ -189,7 +189,31 @@ export async function putSubscription(state) {
     enrolled_employees: state.enrolledEmployees ?? [],
     departments:        state.departments        ?? [],
     shifts:             state.shifts             ?? [],
-    attendance_records: state.attendanceRecords  ?? [],
+    // attendance_records is DELIBERATELY excluded here — see the block
+    // comment above putAttendanceRecords()/addAttendanceRecord() for why.
+    // This function (putSubscription) is the shared write path for every
+    // OTHER mutation (shifts, departments, employees, leave, settings...),
+    // fired from update() in SubscriptionContext with whatever
+    // `state.attendanceRecords` that particular tab/session happened to
+    // have cached at that moment — which, for anyone other than the
+    // employee actively clocking in/out (another tab, an admin's session,
+    // a background retry), can easily be a minute or several stale. Since
+    // this always upserts the FULL row, including that field here meant
+    // ANY unrelated save (editing a shift, approving leave, changing a
+    // setting) — from ANYONE, not just the clocked-in employee — would
+    // silently overwrite the attendance_records column with whatever
+    // stale snapshot that save happened to be carrying, discarding a
+    // break/clock-in/out that had already synced successfully moments (or
+    // even several minutes) earlier. That's exactly the "I started a
+    // break, it synced, then a few minutes later it reverted" symptom —
+    // not a caching bug in the attendance write itself, but a stale
+    // full-object write elsewhere clobbering it after the fact.
+    // The clocked-in employee's own action is the only thing that should
+    // ever move this column, and it already does — through
+    // addAttendanceRecord/updateAttendanceRecord's own putAttendanceRecords
+    // call, a narrow UPDATE of only that one column. Leaving it out of
+    // this payload entirely makes that the sole writer, so this column can
+    // never be dragged backwards by an unrelated save again.
     leave_requests:     state.leaveRequests      ?? [],
     settings:           { ...(state.settings ?? {}), autoDepartments: state.autoDepartments ?? [] },
     status:             state.status,
@@ -241,9 +265,10 @@ export async function putSubscription(state) {
     throw error;
   }
   cacheInvalidate(`subscription:${state.subscriptionId}`);
-  // attendance_records lives both on `subscriptions` and is read separately
-  // via getAttendanceRecords() — keep that cache in sync too.
-  cacheInvalidate(`attendance:${state.subscriptionId}`);
+  // NOT invalidating `attendance:${state.subscriptionId}` here anymore —
+  // this write no longer touches the attendance_records column at all
+  // (see the comment on basePayload above), so the attendance cache is
+  // unaffected by it. Only putAttendanceRecords() below owns that.
 }
 
 // ─── Cookie-consent persistence ────────────────────────────────────────────

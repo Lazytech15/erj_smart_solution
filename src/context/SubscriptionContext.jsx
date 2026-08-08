@@ -106,6 +106,22 @@ export function SubscriptionProvider({ children }) {
   const [loading, setLoading] = useState(true);
   const [pendingEmployees, setPendingEmployees] = useState([]);
 
+  // Timestamp of the most recent local attendance write (clock-in/out,
+  // break, etc. — see addAttendanceRecord/updateAttendanceRecord below).
+  // The attendance poll (tick(), further down) reads this to detect a
+  // specific race: its own getAttendanceRecords() fetch can already be in
+  // flight — reading the server's PRE-write state — at the exact moment a
+  // page (e.g. TimeRenderPage's "Take Break") makes a local write. That
+  // write resolves and updates `subscription.attendanceRecords` correctly,
+  // but the older, still-in-flight poll fetch then resolves too, with its
+  // now-stale pre-write snapshot, and clobbers the fresher local state back
+  // to "before" — which is exactly what looked like clicking a break and
+  // having it silently revert to a regular work segment a moment later. A
+  // poll tick compares its own fetch-start time against this timestamp and
+  // discards its result if a local write landed after the fetch started,
+  // rather than trusting whichever one merely resolves last.
+  const lastAttendanceWriteAtRef = useRef(0);
+
   // ── Reload from Supabase whenever the logged-in user changes ──────────────
   const loadSubscription = useCallback(async (subscriptionId, { cancelledRef } = {}) => {
     setLoading(true);
@@ -223,6 +239,11 @@ export function SubscriptionProvider({ children }) {
       if (document.visibilityState !== 'visible') return; // don't poll while backgrounded
       if (ticking) return; // a tick is already in flight — don't stack another
       ticking = true;
+      // Recorded BEFORE the fetch goes out, so it captures every local
+      // write that could possibly race ahead of it — see
+      // lastAttendanceWriteAtRef's comment above for the failure mode this
+      // guards against.
+      const fetchStartedAt = Date.now();
       let records;
       try {
         records = await getAttendanceRecords(user.subscriptionId);
@@ -251,6 +272,14 @@ export function SubscriptionProvider({ children }) {
       consecutiveFailures = 0;
       notifySupabaseRequestSucceeded();
       if (records === null || cancelled) return; // fetch failed — keep existing
+      // A local attendance write (break, clock-in/out, etc.) landed after
+      // this fetch was already dispatched — this result was read from the
+      // server before that write happened, so it's stale relative to what
+      // the app already has locally. Applying it would silently revert the
+      // newer local state (e.g. "on break" flipping back to "working").
+      // Drop it; the next tick's fetch starts after the write and will
+      // pick up the current data correctly.
+      if (lastAttendanceWriteAtRef.current > fetchStartedAt) return;
       setSubscription(prev => {
         if (!prev) return prev;
         // Skip re-render if records haven't changed
@@ -595,6 +624,7 @@ export function SubscriptionProvider({ children }) {
     const current = subRef.current;
     if (!current) throw new Error('subscription-not-loaded');
     const updatedRecords = [...current.attendanceRecords, newRecord];
+    lastAttendanceWriteAtRef.current = Date.now();
     setSubscription({ ...current, attendanceRecords: updatedRecords });
     try {
       // Only patch attendance_records column — avoids overwriting mobile clock-ins
@@ -609,6 +639,7 @@ export function SubscriptionProvider({ children }) {
     const current = subRef.current;
     if (!current) throw new Error('subscription-not-loaded');
     const updatedRecords = current.attendanceRecords.map(r => r.id === recordId ? { ...r, ...updates } : r);
+    lastAttendanceWriteAtRef.current = Date.now();
     setSubscription({ ...current, attendanceRecords: updatedRecords });
     try {
       // Only patch attendance_records column — avoids overwriting mobile clock-ins

@@ -244,6 +244,36 @@
   pointer-events: none;
 }
 
+/* Covers the /app/dashboard → last-visited-tab correction in
+   LastRouteRestore so the swap reads as a smooth transition rather than a
+   flash of the dashboard followed by a jump. */
+.erj-route-correct {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  opacity: 1;
+  transition: opacity 260ms ease;
+  background: #F3F4F4;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.erj-route-correct--out {
+  opacity: 0;
+  pointer-events: none;
+}
+.erj-route-correct__spinner {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 3px solid #E2E4E7;
+  border-top-color: #2563EB;
+  animation: erj-route-correct-spin 0.7s linear infinite;
+}
+@keyframes erj-route-correct-spin {
+  to { transform: rotate(360deg); }
+}
+
 /* ─── Mobile Responsive Utilities ─────────────────────────────────────────── */
 /* Tables that need horizontal scroll on small screens */
 .table-scroll {
